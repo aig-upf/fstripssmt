@@ -12,10 +12,12 @@ from pathlib import Path
 
 from tarski.syntax.transform import compile_universal_effects_away
 from tarski.io import FstripsReader, find_domain_filename
+from tarski.syntax.transform.action_grounding import ground_schema_into_plain_operator_from_grounding
 from tarski.utils import resources
 from tarski.grounding import LPGroundingStrategy, NaiveGroundingStrategy
 
 from fstripssmt.encodings.classical import ClassicalEncoding
+from fstripssmt.solvers.common import solve
 
 
 def parse_arguments(args):
@@ -74,8 +76,15 @@ def run_on_problem(problem, reachability):
         problem.actions = reachable_schemas
 
     # TODO Let's plan!
-    encoding = ClassicalEncoding(problem)
-    encoding.generate_theory(horizon=2)
+
+    operators = []
+    for name, act in problem.actions.items():
+        for grounding in action_groundings[name]:
+            operators.append(ground_schema_into_plain_operator_from_grounding(act, grounding))
+
+    encoding = ClassicalEncoding(problem, operators, ground_variables)
+    theory = encoding.generate_theory(horizon=3)
+    model = solve(theory)
 
     plan = []
     return plan
