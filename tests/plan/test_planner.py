@@ -10,17 +10,19 @@ here = path.abspath(path.dirname(__file__))
 benchmarks = path.abspath(path.join(here, '..', '..', 'benchmarks'))
 
 
-def test_on_blocks():
-    instance_file, domain_file = collect_strips_benchmarks(["blocks:probBLOCKS-4-0.pddl"])[0]
-    instance_file = path.join(benchmarks, 'blocks', 'p02.pddl')
-    domain_file = find_domain_filename(instance_file)
-    problem = reader().read_problem(domain_file, instance_file)
-
-    plan = run_on_problem(problem, reachability="full")
+def test_on_counters():
+    counters = generate_fstrips_counters_problem(ncounters=3)
+    plan = run_on_problem(counters, reachability="none")
     assert plan
 
 
-# def test_on_counters():
-#     counters = generate_fstrips_counters_problem(ncounters=3)
-#     plan = run_on_problem(counters, reachability="none")
+# def test_on_blocks():
+#     instance_file, domain_file = collect_strips_benchmarks(["blocks:probBLOCKS-4-0.pddl"])[0]
+#     instance_file = path.join(benchmarks, 'blocks', 'p02.pddl')
+#     domain_file = find_domain_filename(instance_file)
+#     problem = reader().read_problem(domain_file, instance_file)
+#
+#     plan = run_on_problem(problem, reachability="full")
 #     assert plan
+
+

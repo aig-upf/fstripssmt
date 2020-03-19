@@ -10,6 +10,7 @@ import subprocess
 from collections import OrderedDict
 from pathlib import Path
 
+from tarski.fstrips.manipulation.simplify import Simplify
 from tarski.syntax.transform import compile_universal_effects_away
 from tarski.io import FstripsReader, find_domain_filename
 from tarski.syntax.transform.action_grounding import ground_schema_into_plain_operator_from_grounding
@@ -49,6 +50,7 @@ def run_on_problem(problem, reachability):
     with resources.timing(f"Preprocessing problem", newline=True):
         # Both the LP reachability analysis and the backend expect a problem without universally-quantified effects
         problem = compile_universal_effects_away(problem)
+        problem = Simplify(problem, problem.init).simplify()
 
     do_reachability = reachability != 'none'
     action_groundings = None  # Schemas will be ground in the backend
@@ -64,6 +66,7 @@ def run_on_problem(problem, reachability):
         with resources.timing(f"Computing naive groundings", newline=True):
             grounding = NaiveGroundingStrategy(problem, ignore_symbols={'total-cost'})
             ground_variables = grounding.ground_state_variables()
+            action_groundings = grounding.ground_actions()
 
     statics, fluents = grounding.static_symbols, grounding.fluent_symbols
 
@@ -85,9 +88,7 @@ def run_on_problem(problem, reachability):
     encoding = ClassicalEncoding(problem, operators, ground_variables)
     theory = encoding.generate_theory(horizon=3)
     model = solve(theory)
-
-    plan = []
-    return plan
+    return encoding.extract_plan(model)
 
 
 def run(args):

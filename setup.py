@@ -26,10 +26,10 @@ def main():
         long_description_content_type='text/markdown',
 
         url='https://github.com/aig-upf/fstripssmt',
-        author='Miquel Ramírez and Guillem Francès',
+        author='Guillem Francès and Miquel Ramírez',
         author_email='guillem.frances@upf.edu',
 
-        keywords='planning logic STRIPS SMT',
+        keywords='planning logic Fcuntional STRIPS SMT',
         classifiers=[
             'Development Status :: 3 - Alpha',
 
