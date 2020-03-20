@@ -10,6 +10,7 @@ import subprocess
 from collections import OrderedDict
 from pathlib import Path
 
+from pysmt.shortcuts import get_unsat_core
 from tarski.fstrips.manipulation.simplify import Simplify
 from tarski.syntax.transform import compile_universal_effects_away
 from tarski.io import FstripsReader, find_domain_filename
@@ -17,7 +18,7 @@ from tarski.syntax.transform.action_grounding import ground_schema_into_plain_op
 from tarski.utils import resources
 from tarski.grounding import LPGroundingStrategy, NaiveGroundingStrategy
 
-from fstripssmt.encodings.classical import ClassicalEncoding
+from fstripssmt.encodings.classical import ClassicalEncoding, linearize_parallel_plan
 from fstripssmt.solvers.common import solve
 
 
@@ -29,6 +30,8 @@ def parse_arguments(args):
                                                        "it from the instance filename.")
 
     parser.add_argument('--debug', action='store_true', help="Compile in debug mode.")
+    parser.add_argument("--max-horizon", type=int, default=10,
+                        help='The maximum (parallel) horizon that will be considered.')
 
     parser.add_argument("--reachability", help='The type of reachability analysis performed', default="full",
                         choices=('full', 'vars', 'none'))
@@ -46,11 +49,12 @@ def extract_names(domain_filename, instance_filename):
     return domain, instance
 
 
-def run_on_problem(problem, reachability):
+def run_on_problem(problem, reachability, max_horizon):
     with resources.timing(f"Preprocessing problem", newline=True):
         # Both the LP reachability analysis and the backend expect a problem without universally-quantified effects
         problem = compile_universal_effects_away(problem)
-        problem = Simplify(problem, problem.init).simplify()
+        simplifier = Simplify(problem, problem.init)
+        problem = simplifier.simplify()
 
     do_reachability = reachability != 'none'
     action_groundings = None  # Schemas will be ground in the backend
@@ -72,23 +76,45 @@ def run_on_problem(problem, reachability):
 
     if action_groundings:
         # Prune those action schemas that have no grounding at all
-        reachable_schemas = OrderedDict()
-        for name, act in problem.actions.items():
-            if action_groundings[name]:
-                reachable_schemas[name] = act
-        problem.actions = reachable_schemas
+        for name, a in list(problem.actions.items()):
+            if not action_groundings[name]:
+                del problem.actions[name]
 
     # TODO Let's plan!
 
     operators = []
     for name, act in problem.actions.items():
         for grounding in action_groundings[name]:
-            operators.append(ground_schema_into_plain_operator_from_grounding(act, grounding))
+            op = ground_schema_into_plain_operator_from_grounding(act, grounding)
+            if reachability == 'full':
+                operators.append(op)
+            else:
+                s = simplifier.simplify_action(op, inplace=True)
+                if s is not None:
+                    operators.append(s)
 
     encoding = ClassicalEncoding(problem, operators, ground_variables)
-    theory = encoding.generate_theory(horizon=3)
-    model = solve(theory)
-    return encoding.extract_plan(model)
+
+    theory = encoding.generate_theory(horizon=max_horizon)
+    print(f"SMT Theory has {len(theory.constraints)} constraints")
+    print("\n".join(map(str, theory.constraints)))
+    model = solve(theory.constraints)
+
+    if model is None:
+        print(f"Could not solve problem under the given max. horizon")
+        ucore = get_unsat_core(theory.constraints)
+        print("UNSAT-Core size '%d'" % len(ucore))
+        for f in ucore:
+            print(f.serialize())
+
+        return None
+
+    plan = linearize_parallel_plan(encoding.extract_parallel_plan(model))
+    print(f"Found length-{len(plan)} plan:")
+    print('\n'.join(map(str, plan)))
+    print("Model:")
+    print(model)
+    return plan
 
 
 def run(args):
@@ -99,14 +125,13 @@ def run(args):
             raise RuntimeError(f'Could not find domain filename that matches instance file "{args.instance}"')
 
     domain_name, instance_name = extract_names(args.domain, args.instance)
-
     print(f'Problem domain: "{domain_name}" ({os.path.realpath(args.domain)})')
     print(f'Problem instance: "{instance_name}" ({os.path.realpath(args.instance)})')
 
     with resources.timing(f"Parsing problem", newline=True):
         problem = parse_problem_with_tarski(args.domain, args.instance)
 
-    plan = run_on_problem(problem, args.reachability)
+    plan = run_on_problem(problem, args.reachability, args.max_horizon)
 
     translation_dir = None
     # Validate the resulting plan:
