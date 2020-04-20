@@ -3,6 +3,7 @@ from collections import OrderedDict, defaultdict
 
 import tarski.fstrips as fs
 from tarski import Constant, Variable, Function
+from tarski.fstrips.representation import collect_literals_from_conjunction, classify_atom_occurrences_in_formula
 from tarski.syntax import symref, Sort, CompoundFormula, QuantifiedFormula, Tautology, CompoundTerm, Atom, \
     neg, Interval, Contradiction
 
@@ -14,8 +15,9 @@ from tarski.syntax.ops import compute_sort_id_assignment
 from tarski.syntax.sorts import parent
 from tarski.theories import has_theory
 
-from fstripssmt.encodings.pysmt import get_pysmt_predicate, get_pysmt_connective
-from fstripssmt.errors import TransformationError
+from .pysmt import get_pysmt_predicate, get_pysmt_connective
+from ..errors import TransformationError
+from ..nested import compile_nested_predicates_into_functions
 
 
 class Theory:
@@ -29,36 +31,32 @@ class ClassicalEncoding:
     """ """
 
     def __init__(self, problem: fs.Problem, operators, statevars):
-        self.problem = problem
-        self.language = self.problem.language
+
+        # Let's first check which symbols appear in the head of a nested term or predicate, e.g.
+        # in expressions such as clear(loc(b1)), or health(target(gun2)).
+        self.problem, self.nested_symbols = compile_nested_predicates_into_functions(problem)
+        self.lang = self.problem.language
         self.operators = operators
         self.statevars = statevars
 
         # Compute a sort-contiguous object ID assignment
-        self.sort_bounds, self.object_ids = compute_sort_id_assignment(self.language)
-        print(self.sort_bounds)
-        print(self.object_ids)
+        self.sort_bounds, self.object_ids = compute_sort_id_assignment(self.lang)
+        # print(self.sort_bounds)
+        # print(self.object_ids)
 
         # A map from compound terms to corresponding state variables
-        self.statevaridx = self._index_state_variables(statevars)
+        self.statevaridx = _index_state_variables(statevars)
 
-        self.interferences = self.compute_interferences()
+        self.interferences, self.mutexes = self.compute_interferences(self.operators)
 
         self.vars = OrderedDict()
         self.actionvars = OrderedDict()  # The boolean vars denoting application of an operator at a given timepoint
-        self.function_types = OrderedDict()
+        self.function_types = OrderedDict()  # TODO Not sure this will be needed
         self.function_terms = OrderedDict()
 
         self.custom_domain_terms = OrderedDict()
 
         self.theory = None
-
-    @staticmethod
-    def _index_state_variables(statevars):
-        indexed = dict()
-        for v in statevars:
-            indexed[symref(v.to_atom())] = v
-        return indexed
 
     def generate_theory(self, horizon):
         """ The main entry point to the class, generates the entire logical theory
@@ -76,24 +74,82 @@ class ClassicalEncoding:
 
         return self.theory
 
-    def compute_interferences(self):
+    def is_state_variable(self, expression):
+        return symref(expression) in self.statevaridx
+
+    def compute_interferences(self, operators):
+        posprec = defaultdict(list)
+        negprec = defaultdict(list)
+        funprec = defaultdict(list)
+        addeff = defaultdict(list)
+        deleff = defaultdict(list)
+        funeff = defaultdict(list)
+        addalleff = defaultdict(list)
+        delalleff = defaultdict(list)
+        funalleff = defaultdict(list)
+
+        mutexes = set()
         interferences = defaultdict(list)
-        for ops in self.operators:
-            for eff in ops.effects:
-                if isinstance(eff, (fs.AddEffect, fs.DelEffect)):
-                    interferences[symref(eff.atom)].append(ops)
-                elif isinstance(eff, fs.FunctionalEffect):
-                    interferences[symref(eff.lhs)].append(ops)
-                else:
+
+        # Classify precondition atoms
+        for op in operators:
+            pos, neg, fun = classify_atom_occurrences_in_formula(op.precondition)
+            _ = [posprec[a].append(str(op)) for a in pos]
+            _ = [negprec[a].append(str(op)) for a in neg]
+            _ = [funprec[a].append(str(op)) for a in fun]
+
+        # Analyze effects
+        for op in operators:
+            for eff in op.effects:
+                if not isinstance(eff, (fs.AddEffect, fs.DelEffect, fs.FunctionalEffect)):
                     raise TransformationError(f'Cannot handle effect "{eff}"')
-        return interferences
+                atom = eff.atom if isinstance(eff, (fs.AddEffect, fs.DelEffect)) else eff.lhs
+
+                if self.is_state_variable(atom):
+                    if isinstance(eff, fs.AddEffect):
+                        addeff[symref(atom)].append(str(op))
+                    elif isinstance(eff, fs.DelEffect):
+                        deleff[symref(atom)].append(str(op))
+                    else:
+                        funeff[symref(atom)].append(str(op))
+                else:
+                    if isinstance(eff, fs.AddEffect):
+                        addalleff[atom.predicate].append(str(op))
+                    elif isinstance(eff, fs.DelEffect):
+                        delalleff[atom.predicate].append(str(op))
+                    else:
+                        funalleff[atom.predicate].append(str(op))
+
+        def add_mutex(op1, op2):
+            if str(op1) != str(op2):
+                mutexes.add(frozenset({str(op1), str(op2)}))
+
+        # Compute mutexes
+        for op in operators:
+            for eff in op.effects:
+                atom = eff.atom if isinstance(eff, (fs.AddEffect, fs.DelEffect)) else eff.lhs
+                if self.is_state_variable(atom):
+
+                    if isinstance(eff, fs.AddEffect):
+                        for conflict in itertools.chain(negprec[symref(atom)], deleff[symref(atom)], delalleff[atom.predicate]):
+                            add_mutex(op, conflict)
+
+                    elif isinstance(eff, fs.DelEffect):
+                        for conflict in itertools.chain(posprec[symref(atom)], addeff[symref(atom)], addalleff[atom.predicate]):
+                            add_mutex(op, conflict)
+                    else:
+                        for conflict in itertools.chain(funprec[symref(atom)], funeff[symref(atom)], funalleff):
+                            add_mutex(op, conflict)
+                        # TODO We need to take into account the RHS !!
+
+        return interferences, mutexes
 
     def resolve_type_for_sort(self, s):
-        if has_theory(self.language, "arithmetic") and s == self.language.Integer:
+        if has_theory(self.lang, "arithmetic") and s == self.lang.Integer:
             return INT
-        elif has_theory(self.language, "arithmetic") and s == self.language.Real:
+        elif has_theory(self.lang, "arithmetic") and s == self.lang.Real:
             return REAL
-        elif isinstance(s, bool):
+        elif s is bool:
             return BOOL
         else:  # We'll model enumerated types as integers
             return INT
@@ -105,10 +161,10 @@ class ClassicalEncoding:
         if sort is None:
             sort = c.sort
 
-        if has_theory(self.language, "arithmetic") and sort == self.language.Integer:
+        if has_theory(self.lang, "arithmetic") and sort == self.lang.Integer:
             return Int(c.symbol)
 
-        if has_theory(self.language, "arithmetic") and sort == self.language.Real:
+        if has_theory(self.lang, "arithmetic") and sort == self.lang.Real:
             return Real(c.symbol)
 
         if isinstance(sort, Interval):
@@ -126,24 +182,25 @@ class ClassicalEncoding:
 
         self.theory.constraints += [GE(y, Int(lb)), LT(y, Int(up))]
 
-    def create_function_type(self, func: Function, t):
-        domain_types = [self.resolve_type_for_sort(s) for s in func.domain]
-        codomain_type = self.resolve_type_for_sort(func.codomain) if isinstance(func, Function) else bool
+    def create_function_type(self, fun: Function, t):
+        assert fun.arity > 0  # Otherwise this would be a state variable
+        domain_types = [self.resolve_type_for_sort(s) for s in fun.domain]
+        # codomain = func.codomain if isinstance(func, Function) else self.resolve_type_for_sort(func.language.Boolean)
+        codomain = fun.codomain if isinstance(fun, Function) else bool
+        codomain_type = self.resolve_type_for_sort(codomain)
+        funtype = FunctionType(codomain_type, domain_types)
+        return Symbol(f"{fun.name}@{t}", funtype), funtype
 
-        func_type = FunctionType(codomain_type, domain_types)
-        self.function_types[func.signature] = func_type
-        self.function_terms[func.signature, t] = Symbol(func.signature, func_type)
-        return self.function_terms[func.signature, t]
-
-    def create_function_application_term(self, f: Function, args, t):
-        # assert False, "This code needs to be revised"
+    def create_function_application_term(self, fun: Function, args, t):
+        """ """
         try:
-            func_term = self.function_terms[f.signature, t]
+            fun_term = self.function_terms[fun.signature, t]
         except KeyError:
-            assert f.arity > 0
-            func_term = self.create_function_type(f, t)
-            self.function_terms[f.signature, t] = func_term
-        return pysmt.shortcuts.Function(func_term, args)
+            fun_term, funtype = self.create_function_type(fun, t)
+            self.function_terms[fun.signature, t] = fun_term
+            self.function_types[fun.signature] = funtype
+
+        return pysmt.shortcuts.Function(fun_term, args)
 
     @staticmethod
     def create_bool_term(atom, name):
@@ -153,10 +210,10 @@ class ClassicalEncoding:
         sort = elem.sort if sort is None else sort
         name = str(elem) if name is None else name
 
-        if has_theory(self.language, "arithmetic") and sort == self.language.Integer:
+        if has_theory(self.lang, "arithmetic") and sort == self.lang.Integer:
             return Symbol(name, INT)
 
-        if has_theory(self.language, "arithmetic") and sort == self.language.Real:
+        if has_theory(self.lang, "arithmetic") and sort == self.lang.Real:
             return Symbol(name, REAL)
 
         if isinstance(sort, Interval):
@@ -168,12 +225,13 @@ class ClassicalEncoding:
         self.create_enum_type_domain_axioms(y_var, elem.sort)
         return y_var
 
-    def smt_nested_expression(self, phi, t):
-        key = (symref(phi), t)
+    def smt_nested_expression(self, phi, t, subt=None):
+        subt = t if subt is None else subt
+        key = (symref(phi), t, subt)
         try:
             return self.vars[key]
         except KeyError:
-            params = [self.rewrite(st, t) for st in phi.subterms]
+            params = [self.rewrite(st, subt) for st in phi.subterms]
             self.vars[key] = res = self.create_function_application_term(phi.symbol, params, t)
         return res
 
@@ -202,12 +260,18 @@ class ClassicalEncoding:
         for sv in self.statevars:
             x = sv.to_atom()
             if isinstance(x, Atom):
-                atom = self.smt_variable(x, 0)
-                self.theory.constraints.append(atom if self.problem.init[x] else Not(atom))
+                expr = self.rewrite(x, 0)
+                if x.symbol in self.nested_symbols:
+                    constraint = expr if self.problem.init[x] else Not(expr)
+                    # val = bool_to_pysmt_boolean(self.problem.init[x])
+                    # constraint = Equals(expr, val)
+                else:
+                    constraint = expr if self.problem.init[x] else Not(expr)
             elif isinstance(x, CompoundTerm):
-                self.theory.constraints += [self.rewrite(x == self.problem.init[x], 0)]
+                constraint = self.rewrite(x == self.problem.init[x], 0)
             else:
                 raise TransformationError(f'Cannot handle state variable "{sv}"')
+            self.theory.constraints.append(constraint)
 
     def goal(self, t):
         self.theory.constraints.append(self.rewrite(self.problem.goal, t))
@@ -221,24 +285,25 @@ class ClassicalEncoding:
         self.theory.constraints += [Implies(op_atom, self.rewrite(op.precondition, t))]
         for eff in op.effects:
             if isinstance(eff, fs.AddEffect):
-                self.theory.constraints.append(Implies(op_atom, self.rewrite(eff.atom, t + 1)))
+                effconstraint = Implies(op_atom, self.rewrite(eff.atom, t + 1, subt=t))
             elif isinstance(eff, fs.DelEffect):
-                self.theory.constraints.append(Implies(op_atom, self.rewrite(neg(eff.atom), t + 1)))
+                effconstraint = Implies(op_atom, self.rewrite(neg(eff.atom), t + 1))
             elif isinstance(eff, fs.FunctionalEffect):
-                lhs = self.rewrite(eff.lhs, t + 1)
+                lhs = self.rewrite(eff.lhs, t + 1, subt=t)
                 rhs = self.rewrite(eff.rhs, t)
-                self.theory.constraints.append(Implies(op_atom, Equals(lhs, rhs)))
+                effconstraint = Implies(op_atom, Equals(lhs, rhs))
             else:
                 raise TransformationError(f"Can't compile effect {eff}")
 
             if not isinstance(eff.condition, Tautology):
                 raise TransformationError(f"Current compilation not yet ready for conditional effects such as {eff}")
+            self.theory.constraints.append(effconstraint)
 
     def assert_frame_axioms(self, t):
         for x in self.statevars:
             atom = x.to_atom()
-            x_t = self.smt_variable(atom, t)
-            x_t1 = self.smt_variable(atom, t + 1)
+            x_t = self.rewrite(atom, t)
+            x_t1 = self.rewrite(atom, t+1)
 
             a_terms = [self.smt_action(op, t) for op in self.interferences[symref(atom)]]
             # x_t != x_{t+1}  =>  some action that affects x_t has been executed at time t
@@ -250,7 +315,8 @@ class ClassicalEncoding:
             for op1, op2 in itertools.combinations(interfering, 2):
                 self.theory.constraints.append(Or(Not(self.actionvars[op1.ident(), t]), Not(self.actionvars[op2.ident(), t])))
 
-    def rewrite(self, phi, t):
+    def rewrite(self, phi, t, subt=None):
+        subt = t if subt is None else subt
         if isinstance(phi, QuantifiedFormula):
             raise TransformationError(f"Don't know how to deal with quantified formula {phi}")
 
@@ -262,20 +328,25 @@ class ClassicalEncoding:
 
         elif isinstance(phi, CompoundFormula):
             pysmt_fun = get_pysmt_connective(phi.connective)
-            return pysmt_fun(*(self.rewrite(psi, t) for psi in phi.subformulas))
+            return pysmt_fun(*(self.rewrite(psi, subt) for psi in phi.subformulas))
 
         elif isinstance(phi, (Atom, CompoundTerm)):
             if phi.symbol.builtin:
                 if len(phi.subterms) != 2:
                     raise TransformationError(f"Unsupported non-binary builtin expression {phi}")
-                lhs, rhs = (self.rewrite(psi, t) for psi in phi.subterms)
+                lhs, rhs = (self.rewrite(psi, subt) for psi in phi.subterms)
                 return get_pysmt_predicate(phi.symbol.symbol)(lhs, rhs)
+
+            if phi.symbol in self.nested_symbols:
+                # Even if phi is a state variable, if its head symbol appears nested elsewhere, we'll need to deal
+                # with it as an uninterpreted function
+                return self.smt_nested_expression(phi, t, subt)
             
-            if symref(phi) in self.statevaridx:
+            elif self.is_state_variable(phi):
                 # For a state variable, simply return the (possibly cached) variable corresponding to it
                 return self.smt_variable(phi, t)
             
-            return self.smt_nested_expression(phi, t)
+            return self.smt_nested_expression(phi, t, subt)
 
         elif isinstance(phi, Variable):
             return self.smt_variable(phi, t)
@@ -314,6 +385,23 @@ class ClassicalEncoding:
             val = self.interpret_term(model, a)
             if val.constant_value():
                 print('{}@{}'.format(aname, t))
+
+
+def bool_to_tarski_boolean(lang, value):
+    assert isinstance(value, bool)
+    return lang.get("True" if value else "False")
+
+
+def bool_to_pysmt_boolean(value):
+    assert isinstance(value, bool)
+    return TRUE() if value else FALSE()
+
+
+def _index_state_variables(statevars):
+    indexed = dict()
+    for v in statevars:
+        indexed[symref(v.to_atom())] = v
+    return indexed
 
 
 def linearize_parallel_plan(plan):
