@@ -15,8 +15,8 @@ benchmarks = path.abspath(path.join(here, '..', '..', 'benchmarks'))
 
 
 def test_on_fstrips_bw():
-    # Let's test the approach on one problem with non-numeric functions and nested expressions
-    # (move(x, y) action has an add-effect $clear(loc(x))$
+    # Let's test the approach on one problem with non-numeric functions and a simple nested expression:
+    #     move(x, y) action has an add-effect $clear(loc(x))$
     problem = generate_fstrips_blocksworld_problem(
         nblocks=2,
         init=[('b1', 'b2'), ('b2', 'table')],
