@@ -155,9 +155,6 @@ class ClassicalEncoding:
             return INT
 
     def resolve_constant(self, c: Constant, sort: Sort = None):
-        if not isinstance(c, Constant):
-            raise TransformationError(f"Compilation of static (constant) terms like '{c}' not implemented yet!")
-
         if sort is None:
             sort = c.sort
 
