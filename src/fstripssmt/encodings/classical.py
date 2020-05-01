@@ -1,18 +1,21 @@
 import itertools
 from collections import OrderedDict, defaultdict
 
+import tarski
 import tarski.fstrips as fs
-from tarski import Constant, Variable, Function
-from tarski.fstrips.representation import collect_literals_from_conjunction, classify_atom_occurrences_in_formula
+from tarski import Constant, Variable, Function, Predicate
+from tarski.fstrips import FunctionalEffect
+from tarski.fstrips.representation import classify_atom_occurrences_in_formula
 from tarski.syntax import symref, Sort, CompoundFormula, QuantifiedFormula, Tautology, CompoundTerm, Atom, \
-    neg, Interval, Contradiction
+    Interval, Contradiction, term_substitution, forall, land, implies, lor, exists
 
 import pysmt
-from pysmt.shortcuts import FreshSymbol, Symbol, EqualsOrIff, Int, Real, FunctionType
+from pysmt.shortcuts import FreshSymbol, Symbol, EqualsOrIff, Int, Real, FunctionType, And
 from pysmt.shortcuts import LT, GE, Equals, Implies, Or, TRUE, FALSE, Not
 from pysmt.typing import INT, BOOL, REAL
-from tarski.syntax.ops import compute_sort_id_assignment
-from tarski.syntax.sorts import parent
+from tarski.syntax.ops import compute_sort_id_assignment, flatten
+from tarski.syntax.sorts import parent, compute_signature_bindings
+from tarski.syntax.util import get_symbols
 from tarski.theories import has_theory
 
 from .pysmt import get_pysmt_predicate, get_pysmt_connective
@@ -31,11 +34,16 @@ class ClassicalEncoding:
     """ """
 
     def __init__(self, problem: fs.Problem, operators, statevars):
+        self.lang = problem.language
+        self.metalang = self.setup_metalang(problem)
 
         # Let's first check which symbols appear in the head of a nested term or predicate, e.g.
         # in expressions such as clear(loc(b1)), or health(target(gun2)).
-        self.problem, self.nested_symbols = compile_nested_predicates_into_functions(problem)
-        self.lang = self.problem.language
+        # We'll pretend all symbols are nested so as to use UF with them
+        self.nested_symbols = set(get_symbols(self.lang, type_="all", include_builtin=False))
+        # self.problem, _ = compile_nested_predicates_into_functions(problem)
+        self.problem = problem
+
         self.operators = operators
         self.statevars = statevars
 
@@ -49,30 +57,112 @@ class ClassicalEncoding:
 
         self.interferences, self.mutexes = self.compute_interferences(self.operators)
 
+        self.eff_index = analyze_action_effects(self.metalang, problem.actions.values())
+        self.gamma_pos, self.gamma_neg, self.gamma_fun = self.compute_gammas(problem, self.metalang)
+
         self.vars = OrderedDict()
         self.actionvars = OrderedDict()  # The boolean vars denoting application of an operator at a given timepoint
         self.function_types = OrderedDict()  # TODO Not sure this will be needed
         self.function_terms = OrderedDict()
 
         self.custom_domain_terms = OrderedDict()
-
+        self.mtheory = []
         self.theory = None
+
+    @staticmethod
+    def setup_metalang(problem):
+        """ Set up the Tarski metalanguage where we will build the SMT compilation """
+        lang = problem.language
+        ml = tarski.fstrips.language(f"{lang.name}-smt", theories=["equality", "arithmetic"])
+
+        # Declare all sorts
+        for s in lang.sorts:
+            if not s.builtin and s.name != "object":
+                ml.sort(s.name, parent(s).name)
+
+        # Declare an extra "timestep" sort. Note: ATM Just using unbounded Natural objects
+        # ts_t = ml.interval("timestep", _get_timestep_sort(ml))
+
+        # Declare all objects in the metalanguage
+        for o in lang.constants():
+            ml.constant(o.symbol, o.sort.name)
+
+        # Declare all symbols
+        for s in get_symbols(lang, type_="all", include_builtin=False):
+            # TODO Deal with non-fluent symbols, which won't need the timestep argument
+            if isinstance(s, Predicate):
+                sort = [t.name for t in s.sort] + [_get_timestep_sort(ml)]
+                ml.predicate(s.name, *sort)
+            else:
+                sort = [t.name for t in s.domain] + [_get_timestep_sort(ml)] + [s.codomain.name]
+                ml.function(s.name, *sort)
+
+        # Declare extra function symbols for the actions
+        for a in problem.actions.values():
+            sort = [x.sort.name for x in a.parameters] + [_get_timestep_sort(ml)]
+            ml.predicate(a.name, *sort)
+
+        return ml
+
+    def compute_gammas(self, problem, ml):
+        """ Compute the gamma sentences for all (fluent) symbols """
+        lang = problem.language
+        gamma_pos = dict()
+        gamma_neg = dict()
+        gamma_f = dict()
+
+        for s in get_symbols(lang, type_="all", include_builtin=False):
+            if not self.symbol_is_fluent(s):
+                continue
+
+            if isinstance(s, Predicate):
+                gamma_pos[s.name] = self.compute_gamma(ml, s, self.eff_index['add'])
+                gamma_neg[s.name] = self.compute_gamma(ml, s, self.eff_index['del'])
+            else:
+                gamma_f[s.name] = self.compute_gamma(ml, s, self.eff_index['fun'])
+
+        return gamma_pos, gamma_neg, gamma_f
+
+    def compute_gamma(self, ml, symbol, idx):
+        tvar = _get_timestep_var(ml)
+
+        disjuncts = []
+        for act, eff in idx[symbol.name]:
+            action_binding = generate_action_arguments(ml, act)
+            action_happens_at_t = ml.get_predicate(act.name)(*action_binding, tvar)
+            effcond = self.to_metalang(eff.condition, tvar)
+            gamma_binding = self.compute_gamma_binding(ml, eff, symbol)
+            gamma_act = exists(*action_binding, land(action_happens_at_t, effcond, *gamma_binding, flat=True))
+            disjuncts.append(gamma_act)
+        return lor(*disjuncts, flat=True)
+
+    def compute_gamma_binding(self, ml, eff, symbol):
+        sym_args = generate_symbol_arguments(ml, symbol)
+        tvar = _get_timestep_var(ml)
+
+        if isinstance(eff, FunctionalEffect):
+            yvar = ml.variable("y", ml.get_sort(symbol.codomain.name))
+            y_bound = [yvar == self.to_metalang(eff.rhs, tvar)]
+            lhs_binding = [self.to_metalang(st, tvar) for st in eff.lhs.subterms]
+            return y_bound + [x == y for x, y in zip(sym_args, lhs_binding)]
+        else:
+            effect_binding = [self.to_metalang(st, tvar) for st in eff.atom.subterms]
+            return [x == y for x, y in zip(sym_args, effect_binding)]
 
     def generate_theory(self, horizon):
         """ The main entry point to the class, generates the entire logical theory
         for a given horizon. """
         self.theory = Theory(self)  # This will overwrite previous Theory objects, if any, and start from scratch
-        self.initial_state()
-
-        for h in range(horizon):
-            for op in self.operators:
-                self.assert_operator(op, h)
-            self.assert_frame_axioms(h)
-            self.assert_interference_axioms(h)
-
+        self.assert_initial_state()
         self.goal(horizon)
 
-        return self.theory
+        self.assert_frame_axioms()
+        self.assert_interference_axioms()
+
+        for a in self.problem.actions.values():
+            self.assert_operator(a)
+
+        return self.mtheory
 
     def is_state_variable(self, expression):
         return symref(expression) in self.statevaridx
@@ -253,64 +343,158 @@ class ClassicalEncoding:
             self.actionvars[key] = res = self.create_bool_term(action, name=f'{action.ident()}@{timepoint}')
         return res
 
-    def initial_state(self):
-        for sv in self.statevars:
-            x = sv.to_atom()
-            if isinstance(x, Atom):
-                expr = self.rewrite(x, 0)
-                if x.symbol in self.nested_symbols:
-                    constraint = expr if self.problem.init[x] else Not(expr)
-                    # val = bool_to_pysmt_boolean(self.problem.init[x])
-                    # constraint = Equals(expr, val)
-                else:
-                    constraint = expr if self.problem.init[x] else Not(expr)
-            elif isinstance(x, CompoundTerm):
-                constraint = self.rewrite(x == self.problem.init[x], 0)
-            else:
-                raise TransformationError(f'Cannot handle state variable "{sv}"')
-            self.theory.constraints.append(constraint)
+    def assert_initial_state(self):
+        # TODO Deal with non-fluent symbols appropriately
+        for p in get_symbols(self.lang, type_="predicate", include_builtin=False):
+            for binding in compute_signature_bindings(p.sort):
+                atom = p(*binding)
+                x = atom if self.problem.init[atom] else ~atom
+                self.mtheory.append(self.to_metalang(x, 0))
+
+        for f in get_symbols(self.lang, type_="function", include_builtin=False):
+            for binding in compute_signature_bindings(f.domain):
+                term = f(*binding)
+                self.mtheory.append(self.to_metalang(term == self.problem.init[term], 0))
 
     def goal(self, t):
-        self.theory.constraints.append(self.rewrite(self.problem.goal, t))
+        self.mtheory.append(self.to_metalang(self.problem.goal, t))
 
-    def assert_operator(self, op, t):
+    def assert_operator(self, op):
         """ For given operator op and timestep t, assert the SMT expression:
                 op@t --> op.precondition@t
                 op@t --> op.effects@(t+1)
         """
-        op_atom = self.smt_action(op, t)
-        self.theory.constraints += [Implies(op_atom, self.rewrite(op.precondition, t))]
+        ml = self.metalang
+        vart = _get_timestep_var(ml)
+        apred = ml.get_predicate(op.name)
+
+        vars_ = generate_action_arguments(ml, op)  # Don't use the timestep arg
+        substitution = {symref(param): arg for param, arg in zip(op.parameters, vars_)}
+        args = vars_ + [vart]
+        happens = apred(*args)
+
+        prec = term_substitution(flatten(op.precondition), substitution)
+        a_implies_prec = forall(*vars_, implies(happens, self.to_metalang(prec, vart)))
+        self.mtheory.append(a_implies_prec)
+
         for eff in op.effects:
+            eff = term_substitution(eff, substitution)
+            antec = happens
+            if not isinstance(eff.condition, Tautology):
+                antec = land(antec, self.to_metalang(eff.condition, vart))
+
             if isinstance(eff, fs.AddEffect):
-                effconstraint = Implies(op_atom, self.rewrite(eff.atom, t + 1, subt=t))
+                a_implies_eff = implies(antec, self.to_metalang(eff.atom, vart+1, subt=vart))
+
             elif isinstance(eff, fs.DelEffect):
-                effconstraint = Implies(op_atom, self.rewrite(neg(eff.atom), t + 1))
+                a_implies_eff = implies(antec, self.to_metalang(~eff.atom, vart+1, subt=vart))
+
             elif isinstance(eff, fs.FunctionalEffect):
-                lhs = self.rewrite(eff.lhs, t + 1, subt=t)
-                rhs = self.rewrite(eff.rhs, t)
-                effconstraint = Implies(op_atom, Equals(lhs, rhs))
+                lhs = self.to_metalang(eff.lhs, vart+1, subt=vart)
+                rhs = self.to_metalang(eff.rhs, vart, subt=vart)
+                a_implies_eff = implies(antec, lhs == rhs)
             else:
                 raise TransformationError(f"Can't compile effect {eff}")
+            self.mtheory.append(a_implies_eff)
 
-            if not isinstance(eff.condition, Tautology):
-                raise TransformationError(f"Current compilation not yet ready for conditional effects such as {eff}")
-            self.theory.constraints.append(effconstraint)
+    def assert_frame_axioms(self):
+        ml = self.metalang
+        tvar = _get_timestep_var(ml)
 
-    def assert_frame_axioms(self, t):
-        for x in self.statevars:
-            atom = x.to_atom()
-            x_t = self.rewrite(atom, t)
-            x_t1 = self.rewrite(atom, t+1)
+        # First deal with predicates;
+        for p in get_symbols(self.lang, type_="predicate", include_builtin=False):
+            lvars = generate_symbol_arguments(self.lang, p)
+            atom = p(*lvars)
 
-            a_terms = [self.smt_action(op, t) for op in self.interferences[symref(atom)]]
-            # x_t != x_{t+1}  =>  some action that affects x_t has been executed at time t
-            # Note that this handles well the case where there is no such action: Or([])=False
-            self.theory.constraints.append(Or(EqualsOrIff(x_t, x_t1), Or(a_terms)))
+            # pos: not p(x, t) and p(x, t+1)  => \gamma^+_(x, t)
+            # neg: p(x, t) and not p(x, t+1)  => \gamma^-_(x, t)
+            at_t = self.to_metalang(atom, tvar)
+            at_t1 = self.to_metalang(atom, tvar + 1)
+            mlvars = generate_symbol_arguments(ml, p)
+            pos = forall(*mlvars, implies(~at_t & at_t1, self.gamma_pos[p.name]))
+            neg = forall(*mlvars, implies(at_t & ~at_t1, self.gamma_neg[p.name]))
+            self.mtheory += [pos, neg]
 
-    def assert_interference_axioms(self, t):
-        for interfering in self.interferences.values():
-            for op1, op2 in itertools.combinations(interfering, 2):
-                self.theory.constraints.append(Or(Not(self.actionvars[op1.ident(), t]), Not(self.actionvars[op2.ident(), t])))
+        # Now deal with functions:
+        for p in get_symbols(self.lang, type_="function", include_builtin=False):
+            lvars = generate_symbol_arguments(self.lang, p)
+            atom = p(*lvars)
+
+            # fun: f(x, t) != y and f(x, t+1) = y   => \gamma^+_(x, t)
+            yvar = ml.variable("y", ml.get_sort(p.codomain.name))
+            at_t = self.to_metalang(atom, tvar) != yvar
+            at_t1 = self.to_metalang(atom, tvar+1) == yvar
+            mlvars = generate_symbol_arguments(ml, p) + [yvar]
+            fun = forall(*mlvars, implies(at_t & at_t1, self.gamma_fun[p.name]))
+            self.mtheory += [fun]
+
+    def assert_interference_axioms(self):
+        ml = self.metalang
+        tvar = _get_timestep_var(ml)
+        for a1, a2 in itertools.combinations_with_replacement(self.problem.actions.values(), 2):
+            a1_args = generate_action_arguments(ml, a1, char="x")
+            a2_args = generate_action_arguments(ml, a2, char="y")
+
+            a1_happens_at_t = ml.get_predicate(a1.name)(*a1_args, tvar)
+            a2_happens_at_t = ml.get_predicate(a2.name)(*a2_args, tvar)
+
+            allargs = a1_args + a2_args + [tvar]
+            sentence = lor(~a1_happens_at_t, ~a2_happens_at_t)
+            if a1.name == a2.name:
+                x_neq_y = land(*(x != y for x, y in zip(a1_args, a2_args)), flat=True)
+                sentence = implies(x_neq_y, sentence)
+            self.mtheory += [forall(*allargs, sentence)]
+
+
+    # def assert_interference_axioms(self, t):
+    #     for interfering in self.interferences.values():
+    #         for op1, op2 in itertools.combinations(interfering, 2):
+    #             self.theory.constraints.append(Or(Not(self.actionvars[op1.ident(), t]),
+    #             Not(self.actionvars[op2.ident(), t])))
+
+
+    def timestep(self, t):
+        return Constant(t, _get_timestep_sort(self.metalang)) if isinstance(t, int) else t
+
+    def symbol_is_fluent(self, symbol):
+        # TODO This needs to be improved
+        return not symbol.builtin
+
+    def to_metalang(self, phi, t, subt=None):
+        ml = self.metalang
+        subt = t if subt is None else subt
+
+        if isinstance(phi, QuantifiedFormula):
+            raise TransformationError(f"Compilation of quantified formula {phi} not yet implemented")
+
+        elif isinstance(phi, (Tautology, Contradiction)):
+            return phi
+
+        elif isinstance(phi, Variable):
+            return ml.variable(phi.symbol, phi.sort.name)
+
+        elif isinstance(phi, Constant):
+            return ml.get_constant(phi.name)
+
+        elif isinstance(phi, CompoundFormula):
+            return CompoundFormula(phi.connective, tuple(self.to_metalang(psi, t) for psi in phi.subformulas))
+
+        elif isinstance(phi, CompoundTerm):
+            # TODO Deal with non-fluent symbols, which won't need the timestep argument
+            args = tuple(self.to_metalang(psi, subt) for psi in phi.subterms)
+            if self.symbol_is_fluent(phi.symbol):
+                args += (self.timestep(t),)
+
+            return CompoundTerm(ml.get_function(phi.symbol.name), args)
+
+        elif isinstance(phi, Atom):
+            # TODO Deal with non-fluent symbols, which won't need the timestep argument
+            args = tuple(self.to_metalang(psi, subt) for psi in phi.subterms)
+            if self.symbol_is_fluent(phi.symbol):
+                args += (self.timestep(t),)
+            return Atom(ml.get_predicate(phi.symbol.name), args)
+
+        raise TransformationError(f"Don't know how to transform element or expression '{phi}' to the SMT metalanguage")
 
     def rewrite(self, phi, t, subt=None):
         subt = t if subt is None else subt
@@ -401,6 +585,54 @@ def _index_state_variables(statevars):
     return indexed
 
 
+def generate_symbol_arguments(lang, symbol, include_codomain=True, c='x'):
+    return [lang.variable(f"{c}{i}", lang.get_sort(s.name)) for i, s in enumerate(symbol.domain, start=1)]
+
+
+def generate_action_arguments(lang, act, char='z'):
+    binding = [lang.variable(f"{char}{i}", lang.get_sort(v.sort.name)) for i, v in enumerate(act.parameters, start=1)]
+    return binding
+    # timestamp = [lang.variable("t", _get_timestep_sort(lang))]
+    # return binding + timestamp
+
+
+def analyze_action_effects(lang, schemas):
+    """ Compile an index of action effects according to the type of effect (add/del/functional) and the
+    symbol they affect. """
+    index = {"add": defaultdict(list), "del": defaultdict(list), "fun": defaultdict(list)}
+
+    for a in schemas:
+        substitution = {symref(param): arg for param, arg in zip(a.parameters, generate_action_arguments(lang, a))}
+
+        for eff in a.effects:
+            if not isinstance(eff, (fs.AddEffect, fs.DelEffect, fs.FunctionalEffect)):
+                raise TransformationError(f'Cannot handle effect "{eff}"')
+
+            # Let's substitute the action parameters for some standard variable names such as z1, z2, ... so that
+            # later on in the compilation we can use them off the self.
+            eff = term_substitution(eff, substitution)
+            atom = eff.atom if isinstance(eff, (fs.AddEffect, fs.DelEffect)) else eff.lhs
+
+            if isinstance(eff, fs.AddEffect):
+                index["add"][atom.symbol.name].append((a, eff))
+            elif isinstance(eff, fs.DelEffect):
+                index["del"][atom.symbol.name].append((a, eff))
+            else:
+                index["fun"][atom.symbol.name].append((a, eff))
+
+    return index
+
+
+def _get_timestep_sort(lang):
+    # Currently we use Real, as Natural gives some casting problems
+    return lang.Real
+
+
+def _get_timestep_var(lang, name="t"):
+    return lang.variable(name, _get_timestep_sort(lang))
+
+
 def linearize_parallel_plan(plan):
     timesteps = sorted(plan.keys())
     return list(itertools.chain.from_iterable(plan[t] for t in timesteps))
+

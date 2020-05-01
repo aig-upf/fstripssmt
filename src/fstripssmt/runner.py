@@ -96,8 +96,8 @@ def run_on_problem(problem, reachability, max_horizon):
     encoding = ClassicalEncoding(problem, operators, ground_variables)
 
     theory = encoding.generate_theory(horizon=max_horizon)
-    print(f"SMT Theory has {len(theory.constraints)} constraints")
-    print("\n".join(map(str, theory.constraints)))
+    print(f"SMT Theory has {len(theory)} constraints")
+    print("\n".join(map(str, theory)))
     model = solve(theory.constraints)
 
     if model is None:

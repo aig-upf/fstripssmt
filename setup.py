@@ -51,7 +51,7 @@ def main():
 
 
         install_requires=[
-            'tarski',
+            'tarski[arithmetic]',
             'pysmt'
         ],
 
