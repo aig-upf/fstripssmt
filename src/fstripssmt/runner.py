@@ -7,19 +7,21 @@ import sys
 import os
 import argparse
 import subprocess
-from collections import OrderedDict
 from pathlib import Path
 
-from pysmt.shortcuts import get_unsat_core
+from pysmt.shortcuts import get_unsat_core, to_smtlib
 from tarski.fstrips.manipulation.simplify import Simplify
+from tarski.syntax.ops import free_variables
 from tarski.syntax.transform import compile_universal_effects_away
 from tarski.io import FstripsReader, find_domain_filename
 from tarski.syntax.transform.action_grounding import ground_schema_into_plain_operator_from_grounding
 from tarski.utils import resources
 from tarski.grounding import LPGroundingStrategy, NaiveGroundingStrategy
 
-from fstripssmt.encodings.classical import ClassicalEncoding, linearize_parallel_plan
+from fstripssmt.encodings.classical import ClassicalEncoding
 from fstripssmt.solvers.common import solve
+from .errors import TransformationError
+from .solvers.pysmt import PySMTTranslator, linearize_parallel_plan
 
 
 def parse_arguments(args):
@@ -95,21 +97,45 @@ def run_on_problem(problem, reachability, max_horizon):
 
     encoding = ClassicalEncoding(problem, operators, ground_variables)
 
-    theory = encoding.generate_theory(horizon=max_horizon)
+    smtlang, theory = encoding.generate_theory(horizon=max_horizon)
     print(f"SMT Theory has {len(theory)} constraints")
-    print("\n".join(map(str, theory)))
-    model = solve(theory.constraints)
+
+    # Some debugging:
+    i = 0
+    for x in theory:
+        if isinstance(x, str):
+            print(f"\n# {x}:")
+        else:
+            print(f'{i}. {x}')
+            i += 1
+
+    theory = [x for x in theory if not isinstance(x, str)]
+    # Some sanity checks
+    for sentence in theory:
+        freevars = free_variables(sentence)
+        if freevars:
+            raise TransformationError(f'Formula {sentence} has unexpected free variables: {freevars}')
+
+    translator = PySMTTranslator(smtlang)
+    translated = translator.translate(theory)
+
+    translated = [t.simplify() for t in translated]
+    # _ = [print(f"{i}. {s.serialize()}") for i, s in enumerate(translated)]
+    _ = [print(f"{i}. {to_smtlib(s, daggify=False)}") for i, s in enumerate(translated)]
+
+
+    model = solve(translated)
 
     if model is None:
-        print(f"Could not solve problem under the given max. horizon")
-        ucore = get_unsat_core(theory.constraints)
-        print("UNSAT-Core size '%d'" % len(ucore))
+        print(f"Could not solve problem under the given max. horizon {max_horizon}")
+        ucore = get_unsat_core(translated)
+        print(f"Showing unsat core of size {len(ucore)}:")
         for f in ucore:
             print(f.serialize())
 
         return None
 
-    plan = linearize_parallel_plan(encoding.extract_parallel_plan(model))
+    plan = linearize_parallel_plan(translator.extract_parallel_plan(model))
     print(f"Found length-{len(plan)} plan:")
     print('\n'.join(map(str, plan)))
     print("Model:")
