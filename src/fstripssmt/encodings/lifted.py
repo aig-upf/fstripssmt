@@ -14,8 +14,9 @@ from tarski.syntax.util import get_symbols
 from ..errors import TransformationError
 
 
-class ClassicalEncoding:
-    """ """
+class FullyLiftedEncoding:
+    """ A fully lifted encoding for a fixed horizon, using quantifiers over both timesteps and
+    action parameters. """
 
     def __init__(self, problem: fs.Problem, operators, statevars):
         self.lang = problem.language
@@ -40,7 +41,6 @@ class ClassicalEncoding:
         self.gamma_pos, self.gamma_neg, self.gamma_fun = self.compute_gammas(problem, self.metalang)
 
         self.vars = OrderedDict()
-        self.actionvars = OrderedDict()  # The boolean vars denoting application of an operator at a given timepoint
 
         self.custom_domain_terms = OrderedDict()
         self.mtheory = []
@@ -314,7 +314,7 @@ class ClassicalEncoding:
             allargs = a1_args + a2_args + [tvar]
             sentence = lor(~a1_happens_at_t, ~a2_happens_at_t)
             if a1.name == a2.name:
-                x_neq_y = land(*(x != y for x, y in zip(a1_args, a2_args)), flat=True)
+                x_neq_y = lor(*(x != y for x, y in zip(a1_args, a2_args)), flat=True)
                 sentence = implies(x_neq_y, sentence)
             self.mtheory += [forall(*allargs, sentence)]
 
@@ -371,8 +371,8 @@ def _index_state_variables(statevars):
     return indexed
 
 
-def generate_symbol_arguments(lang, symbol, include_codomain=True, c='x'):
-    return [lang.variable(f"{c}{i}", lang.get_sort(s.name)) for i, s in enumerate(symbol.domain, start=1)]
+def generate_symbol_arguments(lang, symbol, char='x'):
+    return [lang.variable(f"{char}{i}", lang.get_sort(s.name)) for i, s in enumerate(symbol.domain, start=1)]
 
 
 def generate_action_arguments(lang, act, char='z'):

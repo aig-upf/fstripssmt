@@ -22,16 +22,17 @@ def test_on_fstrips_bw():
         init=[('b1', 'b2'), ('b2', 'table')],
         goal=[('b2', 'table'), ('b1', 'table')]
     )
-    assert run_on_problem(problem, reachability="none", max_horizon=1) == ['move(b1, table)']
+
+    plan = run_on_problem(problem, reachability="none", max_horizon=1)
+    assert plan == ['move(b1, table)']
 
     problem = generate_fstrips_blocksworld_problem(
         nblocks=2,
         init=[('b1', 'b2'), ('b2', 'table')],
         goal=[('b2', 'b1'), ('b1', 'table')]
     )
-    #
-    # assert run_on_problem(problem, reachability="none", max_horizon=1) is None
 
+    assert run_on_problem(problem, reachability="none", max_horizon=1) is None
     assert run_on_problem(problem, reachability="none", max_horizon=2) == ['move(b1, table)', 'move(b2, b1)']
 
     problem = generate_fstrips_blocksworld_problem(
@@ -39,8 +40,18 @@ def test_on_fstrips_bw():
         init=[('b1', 'b2'), ('b2', 'table'), ('b3', 'b4'), ('b4', 'table')],
         goal=[('b2', 'b3'), ('b3', 'b4'), ('b4', 'b1'), ('b1', 'table')]
     )
-    assert 0
 
+    # h=3 is not enough
+    assert run_on_problem(problem, reachability="none", max_horizon=3) is None
+
+    # h=4 is not enough
+    assert run_on_problem(problem, reachability="none", max_horizon=4) is None
+
+    # But there is a length-5 plan
+    plan = run_on_problem(problem, reachability="none", max_horizon=5)
+    possible_plans = ({'move(b3, table)', 'move(b1, table)', 'move(b4, b1)', 'move(b3, b4)', 'move(b2, b3)'},
+                      {'move(b1, table)', 'move(b2, b3)', 'move(b3, b2)', 'move(b3, b4)', 'move(b4, b1)'})
+    assert plan is not None and set(plan) in possible_plans
 
 # def test_on_counters():
 #     counters = generate_fstrips_counters_problem(ncounters=3)
@@ -82,4 +93,3 @@ def test_on_fstrips_bw():
 #     move = problem.get_action("move")
 #     assert str(move.effects[1]) == '(T -> _fclear(loc(x)) := True)'
 #     assert str(move.effects[2]) == '(T -> _fclear(y) := False)'
-
