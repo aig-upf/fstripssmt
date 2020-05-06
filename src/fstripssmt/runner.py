@@ -11,6 +11,7 @@ from pathlib import Path
 
 from pysmt.shortcuts import get_unsat_core, to_smtlib, qelim
 from tarski.fstrips.manipulation.simplify import Simplify
+from tarski.grounding.ops import approximate_symbol_fluency
 from tarski.syntax.ops import free_variables
 from tarski.syntax.transform import compile_universal_effects_away
 from tarski.io import FstripsReader, find_domain_filename
@@ -52,94 +53,64 @@ def extract_names(domain_filename, instance_filename):
 
 
 def run_on_problem(problem, reachability, max_horizon):
+    """ Note that invoking this method might perform several modifications and simplifications to the given problem
+    and its language """
     with resources.timing(f"Preprocessing problem", newline=True):
-        # Both the LP reachability analysis and the backend expect a problem without universally-quantified effects
-        problem = compile_universal_effects_away(problem)
+        # The encoding expects a problem without universally-quantified effects, so let's compile them away
+        problem = compile_universal_effects_away(problem, inplace=True)
+
+        # Let's also some apply trivial simplifications
         simplifier = Simplify(problem, problem.init)
-        problem = simplifier.simplify()
+        problem = simplifier.simplify(inplace=True, remove_unused_symbols=True)
 
-    do_reachability = reachability != 'none'
-    action_groundings = None  # Schemas will be ground in the backend
-    if do_reachability:
-        ground_actions = reachability == 'full'
-        msg = "Computing reachable groundings " + ("(actions+vars)" if ground_actions else "(vars only)")
-        with resources.timing(msg, newline=True):
-            grounding = LPGroundingStrategy(problem, ground_actions=ground_actions, include_variable_inequalities=False)
-            ground_variables = grounding.ground_state_variables()
-            if ground_actions:
-                action_groundings = grounding.ground_actions()
-    else:
-        with resources.timing(f"Computing naive groundings", newline=True):
-            grounding = NaiveGroundingStrategy(problem, ignore_symbols={'total-cost'})
-            ground_variables = grounding.ground_state_variables()
-            action_groundings = grounding.ground_actions()
+        # Compute which symbols are static
+        _, statics = approximate_symbol_fluency(problem)
 
-    statics, fluents = grounding.static_symbols, grounding.fluent_symbols
+    # ATM we disable reachability, as it's not being used for the lifted encoding
+    # do_reachability_analysis(problem, reachability)
 
-    if action_groundings:
-        # Prune those action schemas that have no grounding at all
-        for name, a in list(problem.actions.items()):
-            if not action_groundings[name]:
-                del problem.actions[name]
-
-    # TODO Let's plan!
-
-    operators = []
-    for name, act in problem.actions.items():
-        for grounding in action_groundings[name]:
-            op = ground_schema_into_plain_operator_from_grounding(act, grounding)
-            if reachability == 'full':
-                operators.append(op)
-            else:
-                s = simplifier.simplify_action(op, inplace=True)
-                if s is not None:
-                    operators.append(s)
-
-    encoding = FullyLiftedEncoding(problem, operators, ground_variables)
-
+    # Let's just fix one single horizon value, for the sake of testing
     horizon = max_horizon
 
-    smtlang, theory = encoding.generate_theory(horizon=horizon)
-    anames = set(a.name for a in problem.actions.values())
+    # Ok, down to business: let's generate the theory, which will be represented as a set of first-order sentences
+    # in a different Tarski FOL (smtlang):
+    encoding = FullyLiftedEncoding(problem, statics)
+    smtlang, formulas, comments = encoding.generate_theory(horizon=horizon)
 
-    # Some debugging:
-    formulas = []
-    comments = {}
-    i = 0
-    for x in theory:
-        if isinstance(x, str):
-            cmnt = f";; {x}:"
-            # print("\n" + cmnt)
-            comments[i] = cmnt
-        else:
-            # print(f'{i}. {x}')
-            formulas.append(x)
-            i += 1
-
-    # Some sanity checks
-    # All formulas must be sentences
+    # Some sanity check: All formulas must be sentences!
     for formula in formulas:
         freevars = free_variables(formula)
         if freevars:
             raise TransformationError(f'Formula {formula} has unexpected free variables: {freevars}')
 
-    translator = PySMTTranslator(smtlang, anames)
+    # Once we have the theory in Tarski format, let's just translate it into PySMT format:
+    anames = set(a.name for a in problem.actions.values())
+    translator = PySMTTranslator(smtlang, statics, anames)
     translated = translator.translate(formulas, horizon)
 
+    # Let's simplify the sentences for further clarity
     translated = [t.simplify() for t in translated]
+
+    # Some optional debugging statements:
+    # _ = [print(f"{i}. {s}") for i, s in enumerate(formulas)]
     # _ = [print(f"{i}. {s.serialize()}") for i, s in enumerate(translated)]
     # _ = [print(f"{i}. {to_smtlib(s, daggify=False)}") for i, s in enumerate(translated)]
 
     # Try some built-in quantifier elimination?
     # translated = [qelim(t, solver_name="z3", logic="LIA") for t in translated]
 
+    # Dump the SMT theory
     with open("theory.smtlib", "w") as f:
         print_as_smtlib(translated, comments, f)
 
-    model = solve(translated)
+    return solve_pysmt_theory(translated, horizon, translator)
+
+
+def solve_pysmt_theory(theory, horizon, translator):
+    model = solve(theory)
 
     if model is None:
-        print(f"Could not solve problem under the given max. horizon {max_horizon}")
+        print(f"Could not solve problem under given horizon {horizon}")
         # ucore = get_unsat_core(translated)
         # print(f"Showing unsat core of size {len(ucore)}:")
         # for f in ucore:
@@ -150,8 +121,7 @@ def run_on_problem(problem, reachability, max_horizon):
     plan = linearize_parallel_plan(translator.extract_parallel_plan(model, horizon))
     print(f"Found length-{len(plan)} plan:")
     print('\n'.join(map(str, plan)))
-    # print("Model:")
-    # print(model)
+    # print("Model:", model)
     return plan
 
 

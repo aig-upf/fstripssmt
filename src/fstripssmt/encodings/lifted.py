@@ -4,11 +4,12 @@ from collections import OrderedDict, defaultdict
 import tarski
 import tarski.fstrips as fs
 from tarski.fstrips import FunctionalEffect
+from tarski.fstrips.manipulation.simplify import simplify_existential_quantification, Simplify
 from tarski.fstrips.representation import classify_atom_occurrences_in_formula
 from tarski.syntax import symref, CompoundFormula, QuantifiedFormula, Tautology, CompoundTerm, Atom, \
     Contradiction, term_substitution, forall, land, implies, lor, exists, Constant, Variable, Predicate
 from tarski.syntax.ops import flatten
-from tarski.syntax.sorts import parent, compute_signature_bindings
+from tarski.syntax.sorts import parent, compute_signature_bindings, Interval
 from tarski.syntax.util import get_symbols
 
 from ..errors import TransformationError
@@ -18,24 +19,18 @@ class FullyLiftedEncoding:
     """ A fully lifted encoding for a fixed horizon, using quantifiers over both timesteps and
     action parameters. """
 
-    def __init__(self, problem: fs.Problem, operators, statevars):
-        self.lang = problem.language
-        self.metalang = self.setup_metalang(problem)
-
-        # Let's first check which symbols appear in the head of a nested term or predicate, e.g.
-        # in expressions such as clear(loc(b1)), or health(target(gun2)).
-        # We'll pretend all symbols are nested so as to use UF with them
-        self.nested_symbols = set(get_symbols(self.lang, type_="all", include_builtin=False))
-        # self.problem, _ = compile_nested_predicates_into_functions(problem)
+    def __init__(self, problem: fs.Problem, static_symbols, operators=None, statevars=None):
         self.problem = problem
-
+        self.static_symbols = static_symbols
         self.operators = operators
         self.statevars = statevars
 
-        # A map from compound terms to corresponding state variables
-        self.statevaridx = _index_state_variables(statevars)
+        self.lang = problem.language
+        self.metalang = self.setup_metalang(problem)
 
-        self.interferences, self.mutexes = self.compute_interferences(self.operators)
+        # A map from compound terms to corresponding state variables
+        # self.statevaridx = _index_state_variables(statevars)
+        # self.interferences, self.mutexes = self.compute_interferences(self.operators)
 
         self.eff_index = analyze_action_effects(self.metalang, problem.actions.values())
         self.gamma_pos, self.gamma_neg, self.gamma_fun = self.compute_gammas(problem, self.metalang)
@@ -43,10 +38,13 @@ class FullyLiftedEncoding:
         self.vars = OrderedDict()
 
         self.custom_domain_terms = OrderedDict()
-        self.mtheory = []
+        self.theory = []
 
-    @staticmethod
-    def setup_metalang(problem):
+        # We'll create some comments indexed by the index of the self.theory element to which they refer.
+        # They will be used to increase the clarity while debugging, in SMTLIB outputs, etc.
+        self.comments = {}
+
+    def setup_metalang(self, problem):
         """ Set up the Tarski metalanguage where we will build the SMT compilation. """
         lang = problem.language
         ml = tarski.fstrips.language(f"{lang.name}-smt", theories=["equality", "arithmetic"])
@@ -54,7 +52,10 @@ class FullyLiftedEncoding:
         # Declare all sorts
         for s in lang.sorts:
             if not s.builtin and s.name != "object":
-                ml.sort(s.name, parent(s).name)
+                if isinstance(s, Interval):
+                    ml.interval(s.name, parent(s).name, s.lower_bound, s.upper_bound)
+                else:
+                    ml.sort(s.name, parent(s).name)
 
         # Declare an extra "timestep" sort. Note: ATM Just using unbounded Natural objects
         # ml.Timestep = ml.interval("timestep", _get_timestep_sort(ml), 0, 5)
@@ -66,12 +67,12 @@ class FullyLiftedEncoding:
 
         # Declare all symbols
         for s in get_symbols(lang, type_="all", include_builtin=False):
-            # TODO Deal with non-fluent symbols, which won't need the timestep argument
+            timestep_argument = [_get_timestep_sort(ml)] if self.symbol_is_fluent(s) else []
             if isinstance(s, Predicate):
-                sort = [t.name for t in s.sort] + [_get_timestep_sort(ml)]
+                sort = [t.name for t in s.sort] + timestep_argument
                 ml.predicate(s.name, *sort)
             else:
-                sort = [t.name for t in s.domain] + [_get_timestep_sort(ml)] + [s.codomain.name]
+                sort = [t.name for t in s.domain] + timestep_argument + [s.codomain.name]
                 ml.function(s.name, *sort)
 
         # Declare extra function symbols for the actions
@@ -110,6 +111,10 @@ class FullyLiftedEncoding:
             effcond = self.to_metalang(eff.condition, tvar)
             gamma_binding = self.compute_gamma_binding(ml, eff, symbol)
             gamma_act = exists(*action_binding, land(action_happens_at_t, effcond, *gamma_binding, flat=True))
+
+            # We chain a couple of simplifications of the original gamma expression
+            gamma_act = Simplify().simplify_expression(simplify_existential_quantification(gamma_act))
+
             disjuncts.append(gamma_act)
         return lor(*disjuncts, flat=True)
 
@@ -129,22 +134,22 @@ class FullyLiftedEncoding:
     def generate_theory(self, horizon):
         """ The main entry point to the class, generates the entire logical theory
         for a given horizon. """
-        self.mtheory.append("Initial State")
+        self.comments[len(self.theory)] = ";; Initial State:"
         self.assert_initial_state()
 
-        self.mtheory.append("Goal condition")
+        self.comments[len(self.theory)] = ";; Goal condition:"
         self.goal(horizon)
 
         self.assert_frame_axioms()
 
-        self.mtheory.append("Interference axioms")
+        self.comments[len(self.theory)] = ";; Interference axioms:"
         self.assert_interference_axioms()
 
         for a in self.problem.actions.values():
-            self.mtheory.append(f"Precondition and effects of action {a}")
+            self.comments[len(self.theory)] = f";; Precondition and effects of action {a}:"
             self.assert_action(a)
 
-        return self.metalang, self.mtheory
+        return self.metalang, self.theory, self.comments
 
     def is_state_variable(self, expression):
         return symref(expression) in self.statevaridx
@@ -218,20 +223,18 @@ class FullyLiftedEncoding:
         return interferences, mutexes
 
     def assert_initial_state(self):
-        # TODO Deal with non-fluent symbols appropriately
-        for p in get_symbols(self.lang, type_="predicate", include_builtin=False):
-            for binding in compute_signature_bindings(p.sort):
-                atom = p(*binding)
-                x = atom if self.problem.init[atom] else ~atom
-                self.mtheory.append(self.to_metalang(x, 0))
+        for p in get_symbols(self.lang, type_="all", include_builtin=False):
+            for binding in compute_signature_bindings(p.domain):
+                expr = p(*binding)
 
-        for f in get_symbols(self.lang, type_="function", include_builtin=False):
-            for binding in compute_signature_bindings(f.domain):
-                term = f(*binding)
-                self.mtheory.append(self.to_metalang(term == self.problem.init[term], 0))
+                if isinstance(p, Predicate):
+                    x = expr if self.problem.init[expr] else ~expr
+                    self.theory.append(self.to_metalang(x, 0))
+                else:
+                    self.theory.append(self.to_metalang(expr == self.problem.init[expr], 0))
 
     def goal(self, t):
-        self.mtheory.append(self.to_metalang(self.problem.goal, t))
+        self.theory.append(self.to_metalang(self.problem.goal, t))
 
     def assert_action(self, op):
         """ For given operator op and timestep t, assert the SMT expression:
@@ -249,7 +252,7 @@ class FullyLiftedEncoding:
 
         prec = term_substitution(flatten(op.precondition), substitution)
         a_implies_prec = forall(*args, implies(happens, self.to_metalang(prec, vart)))
-        self.mtheory.append(a_implies_prec)
+        self.theory.append(a_implies_prec)
 
         for eff in op.effects:
             eff = term_substitution(eff, substitution)
@@ -271,7 +274,7 @@ class FullyLiftedEncoding:
                 a_implies_eff = implies(antec, lhs == rhs)
             else:
                 raise TransformationError(f"Can't compile effect {eff}")
-            self.mtheory.append(forall(*args, a_implies_eff))
+            self.theory.append(forall(*args, a_implies_eff))
 
     def assert_frame_axioms(self):
         ml = self.metalang
@@ -279,27 +282,31 @@ class FullyLiftedEncoding:
 
         # First deal with predicates;
         for p in get_symbols(self.lang, type_="all", include_builtin=False):
-            self.mtheory.append(f"Frame axiom for symbol {p}")
+            if not self.symbol_is_fluent(p):
+                continue
+
+            self.comments[len(self.theory)] = f";; Frame axiom for symbol {p}:"
             lvars = generate_symbol_arguments(self.lang, p)
             atom = p(*lvars)
+            fquant = generate_symbol_arguments(ml, p) + [tvar]
 
             if isinstance(p, Predicate):
-                # pos: not p(x, t) and p(x, t+1)  => \gamma^+_(x, t)
-                # neg: p(x, t) and not p(x, t+1)  => \gamma^-_(x, t)
+                # pos: not p(x, t) and p(x, t+1)  => \gamma_p^+(x, t)
+                # neg: p(x, t) and not p(x, t+1)  => \gamma_p^-(x, t)
                 at_t = self.to_metalang(atom, tvar)
                 at_t1 = self.to_metalang(atom, tvar + 1)
-                quant = generate_symbol_arguments(ml, p) + [tvar]
-                pos = forall(*quant, implies(~at_t & at_t1, self.gamma_pos[p.name]))
-                neg = forall(*quant, implies(at_t & ~at_t1, self.gamma_neg[p.name]))
-                self.mtheory += [pos, neg]
+
+                pos = forall(*fquant, implies(~at_t & at_t1, self.gamma_pos[p.name]))
+                neg = forall(*fquant, implies(at_t & ~at_t1, self.gamma_neg[p.name]))
+                self.theory += [pos, neg]
             else:
-                # fun: f(x, t) != y and f(x, t+1) = y   => \gamma^=_(x, y, t)
+                # fun: f(x, t) != f(x, t+1) => \gamma_f[y/f(x, t+1)]
                 yvar = ml.variable("y", ml.get_sort(p.codomain.name))
-                at_t = self.to_metalang(atom, tvar) != yvar
-                at_t1 = self.to_metalang(atom, tvar+1) == yvar
-                quant = generate_symbol_arguments(ml, p) + [yvar] + [tvar]
-                fun = forall(*quant, implies(at_t & at_t1, self.gamma_fun[p.name]))
-                self.mtheory += [fun]
+                at_t = self.to_metalang(atom, tvar)
+                at_t1 = self.to_metalang(atom, tvar+1)
+                gamma_replaced = term_substitution(self.gamma_fun[p.name], {symref(yvar): at_t1})
+                fun = forall(*fquant, implies(at_t != at_t1, gamma_replaced))
+                self.theory += [fun]
 
     def assert_interference_axioms(self):
         ml = self.metalang
@@ -316,11 +323,10 @@ class FullyLiftedEncoding:
             if a1.name == a2.name:
                 x_neq_y = lor(*(x != y for x, y in zip(a1_args, a2_args)), flat=True)
                 sentence = implies(x_neq_y, sentence)
-            self.mtheory += [forall(*allargs, sentence)]
+            self.theory += [forall(*allargs, sentence)]
 
     def symbol_is_fluent(self, symbol):
-        # TODO This needs to be improved
-        return not symbol.builtin
+        return not symbol.builtin and symbol not in self.static_symbols
 
     def to_metalang(self, phi, t, subt=None):
         ml = self.metalang
@@ -336,13 +342,13 @@ class FullyLiftedEncoding:
             return ml.variable(phi.symbol, phi.sort.name)
 
         elif isinstance(phi, Constant):
-            return ml.get_constant(phi.name)
+            # We simply map the constant into the target language constant
+            return Constant(phi.name, ml.get_sort(phi.sort.name))
 
         elif isinstance(phi, CompoundFormula):
             return CompoundFormula(phi.connective, tuple(self.to_metalang(psi, t) for psi in phi.subformulas))
 
         elif isinstance(phi, CompoundTerm):
-            # TODO Deal with non-fluent symbols, which won't need the timestep argument
             args = tuple(self.to_metalang(psi, subt) for psi in phi.subterms)
             if self.symbol_is_fluent(phi.symbol):
                 args += (_get_timestep_const(ml, t),)
@@ -350,10 +356,10 @@ class FullyLiftedEncoding:
             return CompoundTerm(ml.get_function(phi.symbol.name), args)
 
         elif isinstance(phi, Atom):
-            # TODO Deal with non-fluent symbols, which won't need the timestep argument
             args = tuple(self.to_metalang(psi, subt) for psi in phi.subterms)
             if self.symbol_is_fluent(phi.symbol):
                 args += (_get_timestep_const(ml, t),)
+
             return Atom(ml.get_predicate(phi.symbol.name), args)
 
         raise TransformationError(f"Don't know how to transform element or expression '{phi}' to the SMT metalanguage")

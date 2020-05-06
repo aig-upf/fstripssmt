@@ -1,6 +1,7 @@
 # A mapping of Tarski-based theories into PySMT.
 import itertools
 from collections import defaultdict
+from datetime import datetime
 
 import pysmt
 import pysmt.smtlib.commands as smtcmd
@@ -24,12 +25,11 @@ from fstripssmt.errors import TransformationError
 class PySMTTranslator:
     """ """
 
-    def __init__(self, smtlang, action_names, operators=None, statevars=None):
+    def __init__(self, smtlang, static_symbols, action_names):
         assert has_theory(smtlang, "arithmetic")
         self.smtlang = smtlang
+        self.static_symbols = static_symbols
         self.action_names = action_names
-        self.operators = operators
-        self.statevars = statevars
 
         # Compute a sort-contiguous object ID assignment
         self.sort_bounds, self.object_ids = compute_sort_id_assignment(self.smtlang)
@@ -45,6 +45,9 @@ class PySMTTranslator:
         smt_funs = dict()
         smt_actions = dict()
         for s in get_symbols(smtlang, type_="all", include_builtin=False):
+            # arity=0 implies the symbol is not fluent, but static symbols of arity 0 should have
+            # already been compiled away
+            assert s.arity > 0
             fun, ftype = self.create_function_type(s)
             smt_funs[s.name] = (fun, ftype)
 
@@ -53,7 +56,6 @@ class PySMTTranslator:
         return smt_funs, smt_actions
 
     def create_function_type(self, fun: Function):
-        assert fun.arity > 0  # Otherwise this would be a state variable
         domain_types = [self.resolve_type_for_sort(s) for s in fun.domain]
         codomain_type = self.resolve_type_for_sort(fun.codomain) if isinstance(fun, Function) else BOOL
         funtype = FunctionType(codomain_type, domain_types)
@@ -193,29 +195,51 @@ class PySMTTranslator:
         # Otherwise assume we have a enumerated type and simply return the index of the object
         smtvar = Symbol(v.symbol, INT)
 
-        lb, up = self.sort_bounds[v.sort]
+        lb, up = self.get_expression_bounds(v)
         if lb >= up:
             raise TransformationError(f"SMT variable corresponding to sort '{v.sort}' has cardinality 0")
 
         bounds = And(GE(smtvar, Int(lb)), LT(smtvar, Int(up)))
         return smtvar, bounds
 
+    def get_expression_bounds(self, expr):
+        s = expr.sort
+        # Note that bounds in Tarski intervals are inclusive, while here we expect an exclusive upper bound
+        return (s.lower_bound, s.upper_bound+1) if isinstance(s, Interval) else self.sort_bounds[s]
+
     def extract_parallel_plan(self, model, horizon):
         plan = defaultdict(list)
 
         for aname, (pred, smt_node) in self.actionvars.items():
-            for binding in self.compute_signature_bindings(pred.sort, horizon):
+            for binding in self.compute_signature_bindings(pred.domain, horizon):
                 term = self.rewrite(pred(*binding), {}, horizon)
-                val = model[term]
-                if val.constant_value():
+                if model[term].constant_value():
                     timestep = int(binding[-1].name)
                     args = ", ".join(elem.name for elem in binding[:-1])
                     plan[timestep] += [f"{aname}({args})"]
 
+        # A bit of debugging
+        print("A list of all atoms: ")
+        for pred in get_symbols(self.smtlang, type_="all", include_builtin=False):
+            print(pred)
+            for binding in self.compute_signature_bindings(pred.domain, horizon+1):
+                l0_term = pred(*binding)
+                term = self.rewrite(l0_term, {}, horizon)
+                print(f"{l0_term}: {model[term]}")
+                # if model[term].constant_value():
+                #     print(term)
+
         return plan
 
     def compute_signature_bindings(self, signature, horizon):
-        domains = [list(s.domain()) if s != self.smtlang.Real else list(Constant(x, self.smtlang.Real) for x in range(0, horizon)) for s in signature]
+        domains = []
+        for s in signature:
+            if s != self.smtlang.Real:
+                assert not s.builtin  # Better don't generate the domain of a builtin type :-)
+                domains.append(list(s.domain()))
+            else:
+                domains.append(list(Constant(x, self.smtlang.Real) for x in range(0, horizon)))
+
         for binding in itertools.product(*domains):
             yield binding
 
@@ -300,6 +324,7 @@ def print_as_smtlib(smt_formulas, comments, cout):
     # script = smtlibscript_from_formula(And(smt_formulas), logic="QF_UFIDL")
     # script = SmtLibScript()
     # script.add(name=smtcmd.SET_LOGIC, args=["QF_UFIDL"])
+    print(f";; File automatically generated on {datetime.now()}", file=cout)
 
     print_script_command_line(cout, name=smtcmd.SET_LOGIC, args=["QF_UFIDL"])
     print("", file=cout)

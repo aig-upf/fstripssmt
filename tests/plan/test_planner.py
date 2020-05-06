@@ -2,11 +2,7 @@ from os import path
 
 from tarski.benchmarks.blocksworld import generate_fstrips_blocksworld_problem
 from tarski.benchmarks.counters import generate_fstrips_counters_problem
-from tarski.fstrips.manipulation import Simplify
-from tarski.syntax import land
-from tarski.syntax.transform import compile_universal_effects_away
 
-from fstripssmt.nested import compile_nested_predicates_into_functions, NestedExpressionWalker
 from fstripssmt.runner import run_on_problem
 from tests.plan.common import reader, collect_strips_benchmarks
 
@@ -53,22 +49,26 @@ def test_on_fstrips_bw():
                       {'move(b1, table)', 'move(b2, b3)', 'move(b3, b2)', 'move(b3, b4)', 'move(b4, b1)'})
     assert plan is not None and set(plan) in possible_plans
 
-# def test_on_counters():
-#     counters = generate_fstrips_counters_problem(ncounters=3)
-#     plan = run_on_problem(counters, reachability="none", max_horizon=4)
-#     assert plan
-#
-#
-# def test_on_blocks():
-#     instance_file, domain_file = collect_strips_benchmarks(["blocks:probBLOCKS-4-0.pddl"])[0]
-#     problem = reader().read_problem(domain_file, instance_file)
-#
-#     plan = run_on_problem(problem, reachability="full", max_horizon=6)
-#     assert plan
-#
-#     plan = run_on_problem(problem, reachability="full", max_horizon=5)
-#     assert plan is None  # Optimal plan has length 6
-#
+
+def test_on_counters():
+    counters = generate_fstrips_counters_problem(ncounters=3)
+    # Optimal plan is a length-3 sequence with 'increment(c2)', 'increment(c3)', 'increment(c3)'
+    assert run_on_problem(counters, reachability="none", max_horizon=1) is None, "Not solvable in 1 timestep"
+    assert run_on_problem(counters, reachability="none", max_horizon=2) is None, "Not solvable in 2 timesteps"
+
+    plan = run_on_problem(counters, reachability="none", max_horizon=3)
+    assert len(plan) == 3 and plan.count('increment(c3)') == 2 and plan.count('increment(c2)') == 1
+
+
+def test_on_blocks():
+    instance_file, domain_file = collect_strips_benchmarks(["blocks:probBLOCKS-4-0.pddl"])[0]
+    problem = reader().read_problem(domain_file, instance_file)
+    # The only optimal plan has length 6
+    assert run_on_problem(problem, reachability="none", max_horizon=5) is None
+    plan = run_on_problem(problem, reachability="none", max_horizon=6)
+    assert plan == ['pick-up(b)', 'stack(b, a)', 'pick-up(c)', 'stack(c, b)', 'pick-up(d)', 'stack(d, c)']
+
+
 #
 # def test_nested_expression_walker():
 #     problem = generate_fstrips_blocksworld_problem()
