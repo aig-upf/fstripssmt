@@ -141,9 +141,15 @@ def run(args):
 
     plan = run_on_problem(problem, args.reachability, args.max_horizon)
 
-    translation_dir = None
-    # Validate the resulting plan:
-    is_plan_valid = validate(args.domain, args.instance, os.path.join(translation_dir, 'first.plan'))
+    if not plan:
+        return
+
+    # If we found a plan, we validate it
+    planfile = os.path.realpath("plan.out")
+    with open(planfile, "w") as f:
+        print('\n'.join(plan), file=f)
+        print(f'Plan printed to file "{f.name}"')
+        is_plan_valid = validate(args.domain, args.instance, f.name)
 
     return is_plan_valid
 
@@ -158,6 +164,8 @@ def validate(domain_name, instance_name, planfile):
         validate_inputs = ["validate", domain_name, instance_name, planfile]
 
         try:
+            # print("Executing: ", ' '.join(validate_inputs))
+            # _ = subprocess.call('which validate', shell=True)
             _ = subprocess.call(' '.join(validate_inputs), shell=True)
         except OSError as err:
             if err.errno == errno.ENOENT:

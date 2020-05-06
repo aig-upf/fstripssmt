@@ -215,19 +215,19 @@ class PySMTTranslator:
                 term = self.rewrite(pred(*binding), {}, horizon)
                 if model[term].constant_value():
                     timestep = int(binding[-1].name)
-                    args = ", ".join(elem.name for elem in binding[:-1])
-                    plan[timestep] += [f"{aname}({args})"]
+                    args = " ".join(elem.name for elem in binding[:-1])
+                    plan[timestep] += [f"({aname} {args})"]
 
         # A bit of debugging
-        print("A list of all atoms: ")
-        for pred in get_symbols(self.smtlang, type_="all", include_builtin=False):
-            print(pred)
-            for binding in self.compute_signature_bindings(pred.domain, horizon+1):
-                l0_term = pred(*binding)
-                term = self.rewrite(l0_term, {}, horizon)
-                print(f"{l0_term}: {model[term]}")
-                # if model[term].constant_value():
-                #     print(term)
+        # print("A list of all atoms: ")
+        # for pred in get_symbols(self.smtlang, type_="all", include_builtin=False):
+        #     print(pred)
+        #     for binding in self.compute_signature_bindings(pred.domain, horizon+1):
+        #         l0_term = pred(*binding)
+        #         term = self.rewrite(l0_term, {}, horizon)
+        #         print(f"{l0_term}: {model[term]}")
+        #         # if model[term].constant_value():
+        #         #     print(term)
 
         return plan
 
