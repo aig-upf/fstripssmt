@@ -333,7 +333,9 @@ class FullyLiftedEncoding:
         subt = t if subt is None else subt
 
         if isinstance(phi, QuantifiedFormula):
-            raise TransformationError(f"Compilation of quantified formula {phi} not yet implemented")
+            vs = [self.to_metalang(v, t) for v in phi.variables]
+            subf = self.to_metalang(phi.formula, t)
+            return exists(*vs, subf)
 
         elif isinstance(phi, (Tautology, Contradiction)):
             return phi
