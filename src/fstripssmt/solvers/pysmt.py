@@ -324,7 +324,7 @@ def print_as_smtlib(smt_formulas, comments, cout):
     # script = smtlibscript_from_formula(And(smt_formulas), logic="QF_UFIDL")
     # script = SmtLibScript()
     # script.add(name=smtcmd.SET_LOGIC, args=["QF_UFIDL"])
-    print(f";; File automatically generated on {datetime.now()}", file=cout)
+    print(f";; File automatically generated on {datetime.now().date()}", file=cout)
 
     print_script_command_line(cout, name=smtcmd.SET_LOGIC, args=["QF_UFIDL"])
     print("", file=cout)

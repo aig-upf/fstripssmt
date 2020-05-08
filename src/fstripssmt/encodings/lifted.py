@@ -8,6 +8,7 @@ from tarski.fstrips.manipulation.simplify import simplify_existential_quantifica
 from tarski.fstrips.representation import classify_atom_occurrences_in_formula
 from tarski.syntax import symref, CompoundFormula, QuantifiedFormula, Tautology, CompoundTerm, Atom, \
     Contradiction, term_substitution, forall, land, implies, lor, exists, Constant, Variable, Predicate
+from tarski.syntax.formulas import quantified
 from tarski.syntax.ops import flatten
 from tarski.syntax.sorts import parent, compute_signature_bindings, Interval
 from tarski.syntax.util import get_symbols
@@ -24,8 +25,9 @@ class FullyLiftedEncoding:
         self.static_symbols = static_symbols
         self.operators = operators
         self.statevars = statevars
-
         self.lang = problem.language
+
+        self.choice_symbols = compute_choice_symbols(problem.language, problem.init)
         self.metalang = self.setup_metalang(problem)
 
         # A map from compound terms to corresponding state variables
@@ -224,6 +226,8 @@ class FullyLiftedEncoding:
 
     def assert_initial_state(self):
         for p in get_symbols(self.lang, type_="all", include_builtin=False):
+            if self.symbol_is_choice(p):
+                continue  # The value of choice symbols is not determined a priori
             for binding in compute_signature_bindings(p.domain):
                 expr = p(*binding)
 
@@ -328,6 +332,9 @@ class FullyLiftedEncoding:
     def symbol_is_fluent(self, symbol):
         return not symbol.builtin and symbol not in self.static_symbols
 
+    def symbol_is_choice(self, symbol):
+        return symbol in self.choice_symbols
+
     def to_metalang(self, phi, t, subt=None):
         ml = self.metalang
         subt = t if subt is None else subt
@@ -335,7 +342,7 @@ class FullyLiftedEncoding:
         if isinstance(phi, QuantifiedFormula):
             vs = [self.to_metalang(v, t) for v in phi.variables]
             subf = self.to_metalang(phi.formula, t)
-            return exists(*vs, subf)
+            return quantified(phi.quantifier, *vs, subf)
 
         elif isinstance(phi, (Tautology, Contradiction)):
             return phi
@@ -431,3 +438,13 @@ def _get_timestep_var(lang, name="t"):
 def _get_timestep_const(lang, value):
     return Constant(value, _get_timestep_sort(lang)) if isinstance(value, int) else value
 
+
+def compute_choice_symbols(lang, init):
+    # Note that ATM we cannot consider that predicate symbols without initial denotation are choice
+    # symbols, because of the closed world assumption (i.e. no denotation already means emptyset denotation).
+    # Of course we can devise some other mechanism to explicitly represent choice symbols that will avoid this problem.
+    choices = set()
+    for s in get_symbols(lang, type_="function", include_builtin=False):
+        if s.signature not in init.function_extensions:
+            choices.add(s)
+    return choices

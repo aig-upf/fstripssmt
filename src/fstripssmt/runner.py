@@ -33,7 +33,7 @@ def parse_arguments(args):
                                                        "it from the instance filename.")
 
     parser.add_argument('--debug', action='store_true', help="Compile in debug mode.")
-    parser.add_argument("--max-horizon", type=int, default=10,
+    parser.add_argument("-H", "--max-horizon", type=int, default=1,
                         help='The maximum (parallel) horizon that will be considered.')
 
     parser.add_argument("--reachability", help='The type of reachability analysis performed', default="full",
