@@ -74,8 +74,9 @@ def run_on_problem(problem, reachability, max_horizon):
 
     # Ok, down to business: let's generate the theory, which will be represented as a set of first-order sentences
     # in a different Tarski FOL (smtlang):
-    encoding = FullyLiftedEncoding(problem, statics)
-    smtlang, formulas, comments = encoding.generate_theory(horizon=horizon)
+    with resources.timing(f"Generating theory", newline=True):
+        encoding = FullyLiftedEncoding(problem, statics)
+        smtlang, formulas, comments = encoding.generate_theory(horizon=horizon)
 
     # Some sanity check: All formulas must be sentences!
     for formula in formulas:
@@ -84,12 +85,13 @@ def run_on_problem(problem, reachability, max_horizon):
             raise TransformationError(f'Formula {formula} has unexpected free variables: {freevars}')
 
     # Once we have the theory in Tarski format, let's just translate it into PySMT format:
-    anames = set(a.name for a in problem.actions.values())
-    translator = PySMTTranslator(smtlang, statics, anames)
-    translated = translator.translate(formulas, horizon)
+    with resources.timing(f"Translating theory to pysmt", newline=True):
+        anames = set(a.name for a in problem.actions.values())
+        translator = PySMTTranslator(smtlang, statics, anames)
+        translated = translator.translate(formulas, horizon)
 
-    # Let's simplify the sentences for further clarity
-    translated = [t.simplify() for t in translated]
+        # Let's simplify the sentences for further clarity
+        translated = [t.simplify() for t in translated]
 
     # Some optional debugging statements:
     # _ = [print(f"{i}. {s}") for i, s in enumerate(formulas)]
@@ -103,7 +105,8 @@ def run_on_problem(problem, reachability, max_horizon):
     with open("theory.smtlib", "w") as f:
         print_as_smtlib(translated, comments, f)
 
-    return solve_pysmt_theory(translated, horizon, translator)
+    with resources.timing(f"Solving theory", newline=True):
+        return solve_pysmt_theory(translated, horizon, translator)
 
 
 def solve_pysmt_theory(theory, horizon, translator):
