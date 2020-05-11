@@ -211,7 +211,7 @@ class PySMTTranslator:
         plan = defaultdict(list)
 
         for aname, (pred, smt_node) in self.actionvars.items():
-            for binding in self.compute_signature_bindings(pred.domain, horizon):
+            for binding in compute_signature_bindings(self.smtlang, pred.domain, horizon):
                 term = self.rewrite(pred(*binding), {}, horizon)
                 if model[term].constant_value():
                     timestep = int(binding[-1].name)
@@ -230,18 +230,6 @@ class PySMTTranslator:
         #         #     print(term)
 
         return plan
-
-    def compute_signature_bindings(self, signature, horizon):
-        domains = []
-        for s in signature:
-            if s != self.smtlang.Real:
-                assert not s.builtin  # Better don't generate the domain of a builtin type :-)
-                domains.append(list(s.domain()))
-            else:
-                domains.append(list(Constant(x, self.smtlang.Real) for x in range(0, horizon)))
-
-        for binding in itertools.product(*domains):
-            yield binding
 
     # **************** SOME OLD CODE THAT COULD STILL BE USEFUL FOLLOWS **************** #
     # **************** SOME OLD CODE THAT COULD STILL BE USEFUL FOLLOWS **************** #
@@ -361,3 +349,16 @@ def print_as_smtlib(smt_formulas, comments, cout):
     print_script_command_line(cout, name=smtcmd.CHECK_SAT, args=[])
 
     # script.serialize(cout, daggify=False)
+
+
+def compute_signature_bindings(lang, signature, horizon):
+    domains = []
+    for s in signature:
+        if s != lang.Real:
+            assert not s.builtin  # Better don't generate the domain of a builtin type :-)
+            domains.append(list(s.domain()))
+        else:
+            domains.append(list(Constant(x, lang.Real) for x in range(0, horizon)))
+
+    for binding in itertools.product(*domains):
+        yield binding

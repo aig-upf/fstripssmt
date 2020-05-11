@@ -2,6 +2,7 @@
     Helper to run the planner
 """
 import errno
+import itertools
 import logging
 import sys
 import os
@@ -9,6 +10,7 @@ import argparse
 import subprocess
 from pathlib import Path
 
+from tarski import Variable
 from tarski.fstrips.manipulation.simplify import Simplify
 from tarski.grounding.ops import approximate_symbol_fluency
 from tarski.syntax import QuantifiedFormula, Quantifier, lor, land
@@ -16,13 +18,13 @@ from tarski.syntax.formulas import is_and
 from tarski.syntax.ops import free_variables
 from tarski.syntax.transform import compile_universal_effects_away
 from tarski.io import FstripsReader, find_domain_filename
-from tarski.syntax.transform.substitutions import enumerate_substitutions, term_substitution
+from tarski.syntax.transform.substitutions import term_substitution, create_substitution
 from tarski.utils import resources
 
 from fstripssmt.encodings.lifted import FullyLiftedEncoding
 from fstripssmt.solvers.common import solve
 from .errors import TransformationError
-from .solvers.pysmt import PySMTTranslator, linearize_parallel_plan, print_as_smtlib
+from .solvers.pysmt import PySMTTranslator, linearize_parallel_plan, print_as_smtlib, compute_signature_bindings
 
 
 def parse_arguments(args):
@@ -65,13 +67,26 @@ def extract_names(domain_filename, instance_filename):
     return domain, instance
 
 
-def fully_ground(f):
+def enumerate_substitutions(variables, horizon):
+    """ Enumerates all possible substitutions for the given variables.
+    TODO Note that this is a hacky rewriting of the corresponding Tarski method, which we need in order
+         to properly account for the timestep integer type, that we cannot bound at the moment.
+         When that is fixed, we can simply remove this method and use instead:
+    >>> from tarski.syntax.transform.substitutions import enumerate_substitutions
+    """
+    assert len(variables) > 0 and all(isinstance(var, Variable) for var in variables)
+    lang = variables[0].language
+    for values in compute_signature_bindings(lang, [v.sort for v in variables], horizon):
+        yield create_substitution(variables, values)
+
+
+def fully_ground(f, horizon):
     if not isinstance(f, QuantifiedFormula):
         return f
 
     clauses = []
-    for subst in enumerate_substitutions(f.variables):
-        clauses.append(fully_ground(term_substitution(f.formula, subst, inplace=False)))
+    for subst in enumerate_substitutions(f.variables, horizon):
+        clauses.append(fully_ground(term_substitution(f.formula, subst, inplace=False), horizon))
 
     connective = lor if f.quantifier == Quantifier.Exists else land
     return connective(*clauses, flat=True)
@@ -104,7 +119,7 @@ def run_on_problem(problem, reachability, max_horizon, grounding, smtlib_filenam
         smtlang, formulas, comments = encoding.generate_theory(horizon=horizon)
 
     if grounding == 'full':
-        comments, formulas = ground_smt_theory(comments, formulas)
+        comments, formulas = ground_smt_theory(comments, formulas, horizon)
 
     # Some sanity check: All formulas must be sentences!
     for formula in formulas:
@@ -140,10 +155,10 @@ def run_on_problem(problem, reachability, max_horizon, grounding, smtlib_filenam
         return decode_smt_model(model, horizon, translator)
 
 
-def ground_smt_theory(comments, formulas):
+def ground_smt_theory(comments, formulas, horizon):
     with resources.timing(f"Grounding theory", newline=True):
         unwrap = lambda phi: phi.subformulas if is_and(phi) else [phi]
-        formulas = [fully_ground(f) for f in formulas]
+        formulas = [fully_ground(f, horizon) for f in formulas]
         ground = []
         reindexed_comments = dict()
         for i, f in enumerate(formulas, start=0):
