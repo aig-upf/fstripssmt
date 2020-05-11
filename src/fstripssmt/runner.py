@@ -9,15 +9,15 @@ import argparse
 import subprocess
 from pathlib import Path
 
-from pysmt.shortcuts import get_unsat_core, to_smtlib, qelim
 from tarski.fstrips.manipulation.simplify import Simplify
 from tarski.grounding.ops import approximate_symbol_fluency
+from tarski.syntax import QuantifiedFormula, Quantifier, lor, land
+from tarski.syntax.formulas import is_and
 from tarski.syntax.ops import free_variables
 from tarski.syntax.transform import compile_universal_effects_away
 from tarski.io import FstripsReader, find_domain_filename
-from tarski.syntax.transform.action_grounding import ground_schema_into_plain_operator_from_grounding
+from tarski.syntax.transform.substitutions import enumerate_substitutions, term_substitution
 from tarski.utils import resources
-from tarski.grounding import LPGroundingStrategy, NaiveGroundingStrategy
 
 from fstripssmt.encodings.lifted import FullyLiftedEncoding
 from fstripssmt.solvers.common import solve
@@ -52,7 +52,19 @@ def extract_names(domain_filename, instance_filename):
     return domain, instance
 
 
-def run_on_problem(problem, reachability, max_horizon):
+def fully_ground(f):
+    if not isinstance(f, QuantifiedFormula):
+        return f
+
+    clauses = []
+    for subst in enumerate_substitutions(f.variables):
+        clauses.append(fully_ground(term_substitution(f.formula, subst, inplace=False)))
+
+    connective = lor if f.quantifier == Quantifier.Exists else land
+    return connective(*clauses, flat=True)
+
+
+def run_on_problem(problem, reachability, max_horizon, ground=True):
     """ Note that invoking this method might perform several modifications and simplifications to the given problem
     and its language """
     with resources.timing(f"Preprocessing problem", newline=True):
@@ -78,6 +90,19 @@ def run_on_problem(problem, reachability, max_horizon):
         encoding = FullyLiftedEncoding(problem, statics)
         smtlang, formulas, comments = encoding.generate_theory(horizon=horizon)
 
+    if ground:
+        with resources.timing(f"Grounding theory", newline=True):
+            unwrap = lambda phi: phi.subformulas if is_and(phi) else [phi]
+            formulas = [fully_ground(f) for f in formulas]
+            ground = []
+            reindexed_comments = dict()
+            for i, f in enumerate(formulas, start=0):
+                if i in comments:
+                    reindexed_comments[len(ground)] = comments[i]
+                ground += unwrap(f)
+            formulas = ground
+            reindexed_comments = comments
+
     # Some sanity check: All formulas must be sentences!
     for formula in formulas:
         freevars = free_variables(formula)
@@ -102,8 +127,9 @@ def run_on_problem(problem, reachability, max_horizon):
     # translated = [qelim(t, solver_name="z3", logic="LIA") for t in translated]
 
     # Dump the SMT theory
-    with open("theory.smtlib", "w") as f:
-        print_as_smtlib(translated, comments, f)
+    with resources.timing(f"Writing \"theory.smtlib\" file", newline=True):
+        with open("theory.smtlib", "w") as f:
+            print_as_smtlib(translated, comments, f)
 
     with resources.timing(f"Solving theory", newline=True):
         return solve_pysmt_theory(translated, horizon, translator)
