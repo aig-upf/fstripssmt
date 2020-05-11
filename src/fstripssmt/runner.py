@@ -36,12 +36,25 @@ def parse_arguments(args):
     parser.add_argument("-H", "--max-horizon", type=int, default=1,
                         help='The maximum (parallel) horizon that will be considered.')
 
-    parser.add_argument("--reachability", help='The type of reachability analysis performed', default="full",
-                        choices=('full', 'vars', 'none'))
+    # parser.add_argument("--reachability", help='The type of reachability analysis performed', default="full",
+    #                     choices=('full', 'vars', 'none'))
+
+    parser.add_argument("--grounding", help='The type of grounding to be performed', default="none",
+                        choices=('full', 'none'))
+
+    parser.add_argument("--solver", help='The preferred SMT solver. Note that not all solvers accept all encodings',
+                        default="z3",
+                        choices=('msat', 'cvc4', 'yices', 'z3', 'picosat'))
+
+    parser.add_argument("--smtlib",
+                        help='A filename to dump the encoding in SMTLIB format. Use None to skip the dumping',
+                        default="theory.smtlib")
+
     parser.add_argument('--planfile', default=None, help="(Optional) Path to the file where the solution plan "
                                                          "will be left.")
 
     args = parser.parse_args(args)
+    args.reachability = 'none'  # Currently disabled
     return args
 
 
@@ -64,7 +77,7 @@ def fully_ground(f):
     return connective(*clauses, flat=True)
 
 
-def run_on_problem(problem, reachability, max_horizon, ground=True):
+def run_on_problem(problem, reachability, max_horizon, grounding, smtlib_filename=None, solver_name='z3'):
     """ Note that invoking this method might perform several modifications and simplifications to the given problem
     and its language """
     with resources.timing(f"Preprocessing problem", newline=True):
@@ -90,18 +103,8 @@ def run_on_problem(problem, reachability, max_horizon, ground=True):
         encoding = FullyLiftedEncoding(problem, statics)
         smtlang, formulas, comments = encoding.generate_theory(horizon=horizon)
 
-    if ground:
-        with resources.timing(f"Grounding theory", newline=True):
-            unwrap = lambda phi: phi.subformulas if is_and(phi) else [phi]
-            formulas = [fully_ground(f) for f in formulas]
-            ground = []
-            reindexed_comments = dict()
-            for i, f in enumerate(formulas, start=0):
-                if i in comments:
-                    reindexed_comments[len(ground)] = comments[i]
-                ground += unwrap(f)
-            formulas = ground
-            reindexed_comments = comments
+    if grounding == 'full':
+        comments, formulas = ground_smt_theory(comments, formulas)
 
     # Some sanity check: All formulas must be sentences!
     for formula in formulas:
@@ -127,17 +130,32 @@ def run_on_problem(problem, reachability, max_horizon, ground=True):
     # translated = [qelim(t, solver_name="z3", logic="LIA") for t in translated]
 
     # Dump the SMT theory
-    with resources.timing(f"Writing \"theory.smtlib\" file", newline=True):
-        with open("theory.smtlib", "w") as f:
-            print_as_smtlib(translated, comments, f)
+    if smtlib_filename is not None:
+        with resources.timing(f"Writing theory to file \"{smtlib_filename}\"", newline=True):
+            with open("theory.smtlib", "w") as f:
+                print_as_smtlib(translated, comments, f)
 
     with resources.timing(f"Solving theory", newline=True):
-        return solve_pysmt_theory(translated, horizon, translator)
+        model = solve(translated, solver_name)
+        return decode_smt_model(model, horizon, translator)
 
 
-def solve_pysmt_theory(theory, horizon, translator):
-    model = solve(theory)
+def ground_smt_theory(comments, formulas):
+    with resources.timing(f"Grounding theory", newline=True):
+        unwrap = lambda phi: phi.subformulas if is_and(phi) else [phi]
+        formulas = [fully_ground(f) for f in formulas]
+        ground = []
+        reindexed_comments = dict()
+        for i, f in enumerate(formulas, start=0):
+            if i in comments:
+                reindexed_comments[len(ground)] = comments[i]
+            ground += unwrap(f)
+        formulas = ground
+        comments = reindexed_comments
+    return comments, formulas
 
+
+def decode_smt_model(model, horizon, translator):
     if model is None:
         print(f"Could not solve problem under given horizon {horizon}")
         # ucore = get_unsat_core(translated)
@@ -168,7 +186,7 @@ def run(args):
     with resources.timing(f"Parsing problem", newline=True):
         problem = parse_problem_with_tarski(args.domain, args.instance)
 
-    plan = run_on_problem(problem, args.reachability, args.max_horizon)
+    plan = run_on_problem(problem, args.reachability, args.max_horizon, args.grounding, args.smtlib, args.solver)
 
     if not plan:
         return

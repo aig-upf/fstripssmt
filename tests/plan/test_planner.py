@@ -19,8 +19,8 @@ def test_on_fstrips_bw():
         goal=[('b2', 'table'), ('b1', 'table')]
     )
 
-    plan = run_on_problem(problem, reachability="none", max_horizon=1)
-    assert plan == ['move(b1, table)']
+    plan = run_on_problem(problem, reachability="none", max_horizon=1, grounding='none')
+    assert plan == ['(move b1 table)']
 
     problem = generate_fstrips_blocksworld_problem(
         nblocks=2,
@@ -28,8 +28,9 @@ def test_on_fstrips_bw():
         goal=[('b2', 'b1'), ('b1', 'table')]
     )
 
-    assert run_on_problem(problem, reachability="none", max_horizon=1) is None
-    assert run_on_problem(problem, reachability="none", max_horizon=2) == ['move(b1, table)', 'move(b2, b1)']
+    assert run_on_problem(problem, reachability="none", max_horizon=1, grounding='none') is None
+    assert run_on_problem(problem, reachability="none", max_horizon=2, grounding='none') ==\
+           ['(move b1 table)', '(move b2 b1)']
 
     problem = generate_fstrips_blocksworld_problem(
         nblocks=4,
@@ -38,35 +39,37 @@ def test_on_fstrips_bw():
     )
 
     # h=3 is not enough
-    assert run_on_problem(problem, reachability="none", max_horizon=3) is None
+    assert run_on_problem(problem, reachability="none", max_horizon=3, grounding='none') is None
 
     # h=4 is not enough
-    assert run_on_problem(problem, reachability="none", max_horizon=4) is None
+    assert run_on_problem(problem, reachability="none", max_horizon=4, grounding='none') is None
 
     # But there is a length-5 plan
-    plan = run_on_problem(problem, reachability="none", max_horizon=5)
-    possible_plans = ({'move(b3, table)', 'move(b1, table)', 'move(b4, b1)', 'move(b3, b4)', 'move(b2, b3)'},
-                      {'move(b1, table)', 'move(b2, b3)', 'move(b3, b2)', 'move(b3, b4)', 'move(b4, b1)'})
+    plan = run_on_problem(problem, reachability="none", max_horizon=5, grounding='none')
+    possible_plans = ({'(move b1 table)', '(move b3 table)', '(move b4 b1)', '(move b3 b4)', '(move b2 b3)'},
+                      {'(move b1 table)', '(move b3 b2)', '(move b4 b1)', '(move b3 b4)', '(move b2 b3)'},)
     assert plan is not None and set(plan) in possible_plans
 
 
 def test_on_counters():
     counters = generate_fstrips_counters_problem(ncounters=3)
     # Optimal plan is a length-3 sequence with 'increment(c2)', 'increment(c3)', 'increment(c3)'
-    assert run_on_problem(counters, reachability="none", max_horizon=1) is None, "Not solvable in 1 timestep"
-    assert run_on_problem(counters, reachability="none", max_horizon=2) is None, "Not solvable in 2 timesteps"
+    assert run_on_problem(counters, reachability="none", max_horizon=1, grounding='none') is None,\
+        "Not solvable in 1 timestep"
+    assert run_on_problem(counters, reachability="none", max_horizon=2, grounding='none') is None, \
+        "Not solvable in 2 timesteps"
 
-    plan = run_on_problem(counters, reachability="none", max_horizon=3)
-    assert len(plan) == 3 and plan.count('increment(c3)') == 2 and plan.count('increment(c2)') == 1
+    plan = run_on_problem(counters, reachability="none", max_horizon=3, grounding='none')
+    assert len(plan) == 3 and plan.count('(increment c3)') == 2 and plan.count('(increment c2)') == 1
 
 
 def test_on_blocks():
     instance_file, domain_file = collect_strips_benchmarks(["blocks:probBLOCKS-4-0.pddl"])[0]
     problem = reader().read_problem(domain_file, instance_file)
     # The only optimal plan has length 6
-    assert run_on_problem(problem, reachability="none", max_horizon=5) is None
-    plan = run_on_problem(problem, reachability="none", max_horizon=6)
-    assert plan == ['pick-up(b)', 'stack(b, a)', 'pick-up(c)', 'stack(c, b)', 'pick-up(d)', 'stack(d, c)']
+    assert run_on_problem(problem, reachability="none", max_horizon=5, grounding='none') is None
+    plan = run_on_problem(problem, reachability="none", max_horizon=6, grounding='none')
+    assert plan == ['(pick-up b)', '(stack b a)', '(pick-up c)', '(stack c b)', '(pick-up d)', '(stack d c)']
 
 
 #

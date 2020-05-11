@@ -1,9 +1,8 @@
-import tempfile
 
-from pysmt.shortcuts import Solver, And
+from pysmt.shortcuts import Solver
 
 
-def solve(theory):
+def solve(theory, solver_name):
     """ """
     # with tempfile.NamedTemporaryFile(mode='w+t', delete=False) as f:
     #     for t in theory:
@@ -11,11 +10,10 @@ def solve(theory):
     #     print(f'Theory printed on file {f.name}')
 
     # with Solver(logic="UFIDL") as solver:
-    with Solver(name="yices") as solver:
-    # with Solver(name="z3") as solver:
+    with Solver(name=solver_name) as solver:
         # is_sat = solver.is_sat(And(theory))  # Alternatively
 
-        print(f'Using solver configured with logic {solver.logic}')
+        print(f'Using solver "{solver_name}" configured with logic {solver.logic}')
 
         for sentence in theory:
             solver.add_assertion(sentence)
