@@ -50,8 +50,11 @@
 
 (:goal
     (forall (?p - plane) (exists (?d - day)
-        ;; Could be better expressed with a functional at: (= (at ?p d2) (loc ?d))
-        (at ?p d2 (loc ?d))
+        ;; Could also be expressed with a functional at: (= (at ?p d2) (loc ?d))
+        ;; But that would force us to have a "nowhere" default value to cover for the cases where in
+        ;; some days a plane is not in any airport. The predicate approach is also more flexible in
+        ;; that it allows a plane to be in different airports on the same day.
+        (at ?p ?d (loc ?d))
     ))
 )
 )
