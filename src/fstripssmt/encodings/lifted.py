@@ -14,6 +14,7 @@ from tarski.syntax.sorts import parent, compute_signature_bindings, Interval
 from tarski.syntax.util import get_symbols
 
 from ..errors import TransformationError
+from ..interferences import SemanticInterferences
 
 
 class FullyLiftedEncoding:
@@ -33,6 +34,7 @@ class FullyLiftedEncoding:
         # A map from compound terms to corresponding state variables
         # self.statevaridx = _index_state_variables(statevars)
         # self.interferences, self.mutexes = self.compute_interferences(self.operators)
+        self.interferences = SemanticInterferences(self.problem, self.static_symbols).get_interferences()
 
         self.eff_index = analyze_action_effects(self.metalang, problem.actions.values())
         self.gamma_pos, self.gamma_neg, self.gamma_fun = self.compute_gammas(problem, self.metalang)
