@@ -207,7 +207,7 @@ class PySMTTranslator:
         # Note that bounds in Tarski intervals are inclusive, while here we expect an exclusive upper bound
         return (s.lower_bound, s.upper_bound+1) if isinstance(s, Interval) else self.sort_bounds[s]
 
-    def extract_parallel_plan(self, model, horizon):
+    def extract_parallel_plan(self, model, horizon, print_full_model):
         plan = defaultdict(list)
 
         for aname, (pred, smt_node) in self.actionvars.items():
@@ -215,19 +215,21 @@ class PySMTTranslator:
                 term = self.rewrite(pred(*binding), {}, horizon)
                 if model[term].constant_value():
                     timestep = int(binding[-1].name)
-                    args = " ".join(elem.name for elem in binding[:-1])
+                    args = " ".join(str(elem.name) for elem in binding[:-1])
                     plan[timestep] += [f"({aname} {args})"]
 
-        # A bit of debugging
-        # print("A list of all atoms: ")
-        # for pred in get_symbols(self.smtlang, type_="all", include_builtin=False):
-        #     print(pred)
-        #     for binding in self.compute_signature_bindings(pred.domain, horizon+1):
-        #         l0_term = pred(*binding)
-        #         term = self.rewrite(l0_term, {}, horizon)
-        #         print(f"{l0_term}: {model[term]}")
-        #         # if model[term].constant_value():
-        #         #     print(term)
+        # Useful for debugging
+        if print_full_model:
+            # print("Model:", model)
+            print("A list of all atoms: ")
+            for pred in get_symbols(self.smtlang, type_="all", include_builtin=False):
+                print(pred)
+                for binding in compute_signature_bindings(self.smtlang, pred.domain, horizon+1):
+                    l0_term = pred(*binding)
+                    term = self.rewrite(l0_term, {}, horizon)
+                    print(f"{l0_term}: {model[term]}")
+                    # if model[term].constant_value():
+                    #     print(term)
 
         return plan
 

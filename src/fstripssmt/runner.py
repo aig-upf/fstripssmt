@@ -35,6 +35,8 @@ def parse_arguments(args):
                                                        "it from the instance filename.")
 
     parser.add_argument('--debug', action='store_true', help="Compile in debug mode.")
+    parser.add_argument('--print-model', action='store_true', help="Print full model found by SMT solver, if any.")
+
     parser.add_argument("-H", "--max-horizon", type=int, default=1,
                         help='The maximum (parallel) horizon that will be considered.')
 
@@ -92,7 +94,8 @@ def fully_ground(f, horizon):
     return connective(*clauses, flat=True)
 
 
-def run_on_problem(problem, reachability, max_horizon, grounding, smtlib_filename=None, solver_name='z3'):
+def run_on_problem(problem, reachability, max_horizon, grounding, smtlib_filename=None, solver_name='z3',
+                   print_full_model=False):
     """ Note that invoking this method might perform several modifications and simplifications to the given problem
     and its language """
     with resources.timing(f"Preprocessing problem", newline=True):
@@ -152,7 +155,7 @@ def run_on_problem(problem, reachability, max_horizon, grounding, smtlib_filenam
 
     with resources.timing(f"Solving theory", newline=True):
         model = solve(translated, solver_name)
-        return decode_smt_model(model, horizon, translator)
+        return decode_smt_model(model, horizon, translator, print_full_model)
 
 
 def ground_smt_theory(comments, formulas, horizon):
@@ -170,7 +173,7 @@ def ground_smt_theory(comments, formulas, horizon):
     return comments, formulas
 
 
-def decode_smt_model(model, horizon, translator):
+def decode_smt_model(model, horizon, translator, print_full_model):
     if model is None:
         print(f"Could not solve problem under given horizon {horizon}")
         # ucore = get_unsat_core(translated)
@@ -180,10 +183,9 @@ def decode_smt_model(model, horizon, translator):
 
         return None
 
-    plan = linearize_parallel_plan(translator.extract_parallel_plan(model, horizon))
+    plan = linearize_parallel_plan(translator.extract_parallel_plan(model, horizon, print_full_model))
     print(f"Found length-{len(plan)} plan:")
     print('\n'.join(map(str, plan)))
-    # print("Model:", model)
     return plan
 
 
@@ -201,7 +203,8 @@ def run(args):
     with resources.timing(f"Parsing problem", newline=True):
         problem = parse_problem_with_tarski(args.domain, args.instance)
 
-    plan = run_on_problem(problem, args.reachability, args.max_horizon, args.grounding, args.smtlib, args.solver)
+    plan = run_on_problem(problem, args.reachability, args.max_horizon, args.grounding, args.smtlib, args.solver,
+                          args.print_model)
 
     if not plan:
         return
