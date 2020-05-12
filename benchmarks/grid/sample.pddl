@@ -1,4 +1,4 @@
-(define (problem 4cells)
+(define (problem cells_4)
 (:domain simple-grid)
 (:objects
     pos0-0 pos0-1 pos1-0 pos1-1
