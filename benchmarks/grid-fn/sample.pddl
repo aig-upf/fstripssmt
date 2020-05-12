@@ -3,14 +3,16 @@
 (:objects
 )
 (:init
-    (assign (max_x) 1)
-    (assign (max_y) 1)
-    (assign (x) 0)
-    (assign (y) 0)
+    (= (max_x) 1)
+    (= (max_y) 1)
+    (= (x) 0)
+    (= (y) 0)
 )
 
 (:goal
-    (= (x) 1)
-    (= (y) 1)
+    (and
+        (= (x ) 1)
+        (= (y ) 1)
+    )
 )
 )

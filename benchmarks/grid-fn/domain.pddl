@@ -7,38 +7,38 @@
     (:predicates (at ?x) (adjacent ?x ?y))
 
     (:functions
-        (x) - number
-        (y) - number
+        (x ) - number
+        (y ) - number
         (max_x) - number
         (max_y) - number
     )
 
     (:action move_r :parameters ()
         :precondition
-            (and (< (x) (max_x)))
+            (and (< (x ) (max_x)))
         :effect
-           (and (increase (x)))
+           (and (assign (x ) (+ (x ) 1)))
     )
 
     (:action move_l :parameters ()
         :precondition
-            (and (> (x) 0))
+            (and (> (x ) 0))
         :effect
-           (and (decrease (x)))
+           (and (assign (x ) (- (x ) 1)))
     )
 
 
     (:action move_u :parameters ()
         :precondition
-            (and (< (y) (max_y)))
+            (and (< (y ) (max_y)))
         :effect
-           (and (increase (y)))
+           (and (assign (y ) (+ (y ) 1)))
     )
 
     (:action move_d :parameters ()
         :precondition
-            (and (> (y) 0))
+            (and (> (y ) 0))
         :effect
-           (and (decrease (y)))
+           (and (assign (y ) (- (y ) 1)))
     )
 )
