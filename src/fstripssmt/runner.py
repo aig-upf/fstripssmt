@@ -150,7 +150,7 @@ def run_on_problem(problem, reachability, max_horizon, grounding, smtlib_filenam
     # Dump the SMT theory
     if smtlib_filename is not None:
         with resources.timing(f"Writing theory to file \"{smtlib_filename}\"", newline=True):
-            with open("theory.smtlib", "w") as f:
+            with open(smtlib_filename, "w") as f:
                 print_as_smtlib(translated, comments, f)
 
     with resources.timing(f"Solving theory", newline=True):

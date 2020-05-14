@@ -5,13 +5,12 @@ from datetime import datetime
 
 import pysmt
 import pysmt.smtlib.commands as smtcmd
-from pysmt.smtlib.script import SmtLibScript, smtlibscript_from_formula, SmtLibCommand
+from pysmt.smtlib.script import SmtLibScript, SmtLibCommand
 
 from tarski.syntax import symref, Sort, CompoundFormula, QuantifiedFormula, Tautology, CompoundTerm, Atom, \
-    Interval, Contradiction, term_substitution, forall, land, implies, lor, exists, Function, Constant, Variable, \
-    Quantifier
-from pysmt.shortcuts import FreshSymbol, Symbol, EqualsOrIff, Int, Real, FunctionType, And, ForAll, Exists, get_env
-from pysmt.shortcuts import LT, GE, Equals, Implies, Or, TRUE, FALSE, Not
+    Interval, Contradiction, Function, Constant, Variable, Quantifier
+from pysmt.shortcuts import FreshSymbol, Symbol, Int, Real, FunctionType, And, ForAll, Exists, get_env
+from pysmt.shortcuts import LT, GE, Implies, TRUE, FALSE
 from pysmt.typing import INT, BOOL, REAL
 from tarski.syntax.sorts import parent
 from tarski.syntax.util import get_symbols
@@ -143,16 +142,18 @@ class PySMTTranslator:
     def resolve_type_for_sort(self, s):
         if s == self.smtlang.Integer:
             return INT
-        elif s == self.smtlang.Real:
-            # This is a HACK: currently the only real-typed entities we can have are timestep, which unfortunately with
-            # the current Tarski architecture is not easy to specify as naturals. The current solution is to remap them
-            # back to ints here
-            # return REAL
-            return INT
-        elif s is bool:
+
+        if s == self.smtlang.Real:
+            return REAL
+
+        if s is bool:
             return BOOL
-        else:  # We'll model enumerated types as integers
-            return INT
+
+        if isinstance(s, Interval):
+            return self.resolve_type_for_sort(parent(s))
+
+        # Otherwise we have an enumerated type, which we'll model as an integer
+        return INT
 
     def resolve_constant(self, c: Constant, sort: Sort = None):
         if sort is None:
@@ -162,12 +163,7 @@ class PySMTTranslator:
             return Int(c.symbol)
 
         if sort == self.smtlang.Real:
-            # This is a HACK: currently the only real-typed entities we can have are timestep, which unfortunately with
-            # the current Tarski architecture is not easy to specify as naturals. The current solution is to remap them
-            # back to ints here
-            # return Real(c.symbol)
-            assert isinstance(c.symbol, int) or c.symbol.is_integer()
-            return Int(int(c.symbol))
+            return Real(c.symbol)
 
         if isinstance(sort, Interval):
             return self.resolve_constant(c, parent(sort))
@@ -176,23 +172,14 @@ class PySMTTranslator:
         return Int(self.object_ids[symref(c)])
 
     def create_quantified_variable(self, v, horizon):
+        # First deal with the two unbound cases:
         if v.sort == self.smtlang.Integer:
             return Symbol(v.symbol, INT), TRUE()
 
         if v.sort == self.smtlang.Real:
-            # This is a HACK: currently the only real-typed entities we can have are timestep, which unfortunately with
-            # the current Tarski architecture is not easy to specify as naturals. The current solution is to remap them
-            # back to ints here, AND to force the timestep bounds given by the theory horizon
-            # return Symbol(v.symbol, REAL), TRUE()
-            smtvar = Symbol(v.symbol, INT)
-            lb, up = 0, horizon
-            return smtvar, And(GE(smtvar, Int(lb)), LT(smtvar, Int(up)))
+            return Symbol(v.symbol, REAL), TRUE()
 
-        # if isinstance(v.sort, Interval):
-        #     # TODO This won't work for real intervals, of course.
-        #     return Symbol(v.symbol, INT)
-
-        # Otherwise assume we have a enumerated type and simply return the index of the object
+        # Otherwise assume we have a bounded type (including Enumerated types)
         smtvar = Symbol(v.symbol, INT)
 
         lb, up = self.get_expression_bounds(v)
@@ -204,7 +191,10 @@ class PySMTTranslator:
 
     def get_expression_bounds(self, expr):
         s = expr.sort
-        # Note that bounds in Tarski intervals are inclusive, while here we expect an exclusive upper bound
+        if s == s.language.Timestep:  # Timestep bounds are inclusive
+            return s.lower_bound, s.upper_bound
+
+        # Note that bounds in the other Tarski intervals are inclusive, while here we expect an exclusive upper bound
         return (s.lower_bound, s.upper_bound+1) if isinstance(s, Interval) else self.sort_bounds[s]
 
     def extract_parallel_plan(self, model, horizon, print_full_model):
@@ -356,11 +346,7 @@ def print_as_smtlib(smt_formulas, comments, cout):
 def compute_signature_bindings(lang, signature, horizon):
     domains = []
     for s in signature:
-        if s != lang.Real:
-            assert not s.builtin  # Better don't generate the domain of a builtin type :-)
-            domains.append(list(s.domain()))
-        else:
-            domains.append(list(Constant(x, lang.Real) for x in range(0, horizon)))
+        domains.append(list(s.domain()))
 
     for binding in itertools.product(*domains):
         yield binding

@@ -19,7 +19,8 @@ def test_on_fstrips_bw():
         goal=[('b2', 'table'), ('b1', 'table')]
     )
 
-    plan = run_on_problem(problem, reachability="none", max_horizon=1, grounding='none')
+    plan = run_on_problem(problem, reachability="none", max_horizon=1, grounding='none',
+                          smtlib_filename="theory.smtlib", print_full_model=True)
     assert plan == ['(move b1 table)']
 
     problem = generate_fstrips_blocksworld_problem(
