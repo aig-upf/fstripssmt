@@ -3,6 +3,7 @@ from collections import OrderedDict, defaultdict
 
 import tarski
 import tarski.fstrips as fs
+from tarski import Term
 from tarski.fstrips import FunctionalEffect
 from tarski.fstrips.manipulation.simplify import simplify_existential_quantification, Simplify
 from tarski.fstrips.representation import classify_atom_occurrences_in_formula
@@ -61,9 +62,8 @@ class FullyLiftedEncoding:
                 else:
                     ml.sort(s.name, parent(s).name)
 
-        # Declare an extra "timestep" sort. Note: ATM Just using unbounded Natural objects
-        # ml.Timestep = ml.interval("timestep", _get_timestep_sort(ml), 0, 5)
-        # ml.Timestep = ml.interval("timestep", ml.Real, 0, 5)
+        # Declare an extra "timestep" sort with a large range, which we'll adjust once we know the horizon
+        ml.Timestep = ml.interval("timestep", ml.Natural, 0, 99999)
 
         # Declare all objects in the metalanguage
         for o in lang.constants():
@@ -138,6 +138,9 @@ class FullyLiftedEncoding:
     def generate_theory(self, horizon):
         """ The main entry point to the class, generates the entire logical theory
         for a given horizon. """
+        # Force the given horizon into the timestep sort
+        self.metalang.Timestep.set_bounds(0, horizon)
+
         self.comments[len(self.theory)] = ";; Initial State:"
         self.assert_initial_state()
 
@@ -361,15 +364,20 @@ class FullyLiftedEncoding:
 
         elif isinstance(phi, CompoundTerm):
             args = tuple(self.to_metalang(psi, subt) for psi in phi.subterms)
+
+            if phi.symbol.builtin:
+                op, lhs, rhs = ml.get_operator_matching_arguments(phi.symbol.symbol, *args)
+                return op(lhs, rhs)
+
             if self.symbol_is_fluent(phi.symbol):
-                args += (_get_timestep_const(ml, t),)
+                args += (_get_timestep_term(ml, t),)
 
             return CompoundTerm(ml.get_function(phi.symbol.name), args)
 
         elif isinstance(phi, Atom):
             args = tuple(self.to_metalang(psi, subt) for psi in phi.subterms)
             if self.symbol_is_fluent(phi.symbol):
-                args += (_get_timestep_const(ml, t),)
+                args += (_get_timestep_term(ml, t),)
 
             return Atom(ml.get_predicate(phi.symbol.name), args)
 
@@ -427,18 +435,17 @@ def analyze_action_effects(lang, schemas):
 
 
 def _get_timestep_sort(lang):
-    # Currently we use Real, as Natural gives some casting problems
-    # return lang.Timestep
-    # return lang.Natural
-    return lang.Real
+    return lang.Timestep
 
 
 def _get_timestep_var(lang, name="t"):
     return lang.variable(name, _get_timestep_sort(lang))
 
 
-def _get_timestep_const(lang, value):
-    return Constant(value, _get_timestep_sort(lang)) if isinstance(value, int) else value
+def _get_timestep_term(lang, value):
+    if isinstance(value, Term):
+        return value
+    return _get_timestep_sort(lang).cast(value)
 
 
 def compute_choice_symbols(lang, init):
