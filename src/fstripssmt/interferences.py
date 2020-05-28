@@ -1,26 +1,26 @@
 import copy
 import sys
 
-from multipledispatch import dispatch
 from pysmt.shortcuts import FreshSymbol, Symbol, EqualsOrIff, Int, Real, FunctionType, And, ForAll, Exists, get_env
 from pysmt.shortcuts import LT, GE, Equals, Implies, Or, TRUE, FALSE, Not, Symbol
 from pysmt.typing import INT, BOOL, REAL
+from tarski.fstrips.representation import substitute_expression
 from tarski.syntax.ops import all_variables
 #from fstripssmt.runner import decode_smt_model
 from tarski.syntax.ops import compute_sort_id_assignment
+
 from fstripssmt.solvers.common import solve
 from .solvers.pysmt import PySMTTranslator, print_as_smtlib
 from .errors import TransformationError
 
 import tarski
-from tarski import Term
 from tarski.syntax.ops import free_variables
 from tarski.utils import resources
 from tarski.syntax import top
 from tarski.fstrips.walker import ProblemWalker
 from tarski.grounding.ops import approximate_symbol_fluency
 from tarski.syntax import symref, CompoundFormula, QuantifiedFormula, Tautology, CompoundTerm, Atom, \
-   Contradiction, term_substitution, forall, land, implies, lor, exists, Constant, Variable, Predicate
+   Contradiction, land, implies, exists, Constant, Variable, Predicate
 from tarski.syntax.formulas import quantified, neg, equiv
 from tarski.syntax.sorts import parent, Interval
 from tarski.syntax.util import get_symbols
@@ -163,21 +163,21 @@ class SemanticInterferences(ProblemWalker):
                     vars_b, subs_b, translated_b = self.get_translated_effect(b, b_eff, 'b_')
 
                     # and make the substitutions: Eff_a \sigma_b, and Eff_b \sigma_a
-                    a_seff = term_substitution(translated_a, substitution)
-                    b_seff = term_substitution(translated_b, substitution)
+                    a_seff = substitute_expression(translated_a, substitution)
+                    b_seff = substitute_expression(translated_b, substitution)
 
                     # ------- Some debug statements -------
                     print(substitution)
-                    print(f"substituting {translated_a} into {translated_b} lends to: {a_seff}")
-                    print(f"substituting {translated_b} into {translated_a} lends to: {b_seff}")
+                    print(f"Applying {substitution} to {translated_a} leads to: {a_seff}")
+                    print(f"Applying {substitution} to {translated_b} leads to: {b_seff}")
 
                     # construct not (sigma_a = sigma_b)
                     neq_eff = neg(equiv(translated_a,translated_b))
 
                     # we must force that parameters are the same to be able to say that we are talking
                     # about the same underlying variable (i.e. the same grounded var)
-                    parameters_term_a = term_substitution(modified_a, subs_a).subterms
-                    parameters_term_b = term_substitution(modified_b, subs_b).subterms
+                    parameters_term_a = substitute_expression(modified_a, subs_a).subterms
+                    parameters_term_b = substitute_expression(modified_b, subs_b).subterms
                     equalities = [ a == b for a, b in zip(parameters_term_a, parameters_term_b)]
 
                     # finally lets check if not (sigma_a = sigma_b) is T - satisfiable
@@ -193,7 +193,6 @@ class SemanticInterferences(ProblemWalker):
                         print("UNSAT, this means that they are simply commuting")
         return True
 
-
     def get_translated_effect(self, a, eff, prefix):
         """ translate the effects to the metalang """
         ml = self.metalang
@@ -201,7 +200,7 @@ class SemanticInterferences(ProblemWalker):
         vart = _get_timestep_var(ml)
         vars_ = generate_action_arguments(ml, a, char=prefix)  # Don't use the timestep arg
         substitution_ = {symref(param): arg for param, arg in zip(a.parameters, vars_)}
-        seff = term_substitution(eff, substitution_)
+        seff = substitute_expression(eff, substitution_)
 
         # Prepend the effect condition, if necessary, and translate:
         if not isinstance(seff.condition, Tautology):
@@ -276,7 +275,7 @@ class SemanticInterferences(ProblemWalker):
             substitution[symref(x_t)] = x_t
         elif isinstance(eff, fs.DelEffect):
             x_t = self.to_metalang(eff.atom, vart, subt=vart)
-            substitution[symref(x_t)] = self.to_metalang(neg(x_t), vart, subt=vart)
+            substitution[symref(x_t)] = self.to_metalang(neg(eff.atom), vart, subt=vart)
         elif isinstance(eff, fs.FunctionalEffect):
             x_t = self.to_metalang(eff.lhs, vart, subt=vart)
             substitution[symref(x_t)] = self.to_metalang(eff.rhs, vart, subt=vart)

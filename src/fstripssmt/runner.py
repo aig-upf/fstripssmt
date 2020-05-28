@@ -2,7 +2,6 @@
     Helper to run the planner
 """
 import errno
-import itertools
 import logging
 import sys
 import os
@@ -12,13 +11,13 @@ from pathlib import Path
 
 from tarski import Variable
 from tarski.fstrips.manipulation.simplify import Simplify
+from tarski.fstrips.representation import compile_universal_effects_away
 from tarski.grounding.ops import approximate_symbol_fluency
 from tarski.syntax import QuantifiedFormula, Quantifier, lor, land
 from tarski.syntax.formulas import is_and
 from tarski.syntax.ops import free_variables
-from tarski.syntax.transform import compile_universal_effects_away
 from tarski.io import FstripsReader, find_domain_filename
-from tarski.syntax.transform.substitutions import term_substitution, create_substitution
+from tarski.syntax.transform.substitutions import create_substitution, substitute_expression
 from tarski.utils import resources
 
 from fstripssmt.encodings.lifted import FullyLiftedEncoding
@@ -88,7 +87,7 @@ def fully_ground(f, horizon):
 
     clauses = []
     for subst in enumerate_substitutions(f.variables, horizon):
-        clauses.append(fully_ground(term_substitution(f.formula, subst, inplace=False), horizon))
+        clauses.append(fully_ground(substitute_expression(f.formula, subst, inplace=False), horizon))
 
     connective = lor if f.quantifier == Quantifier.Exists else land
     return connective(*clauses, flat=True)

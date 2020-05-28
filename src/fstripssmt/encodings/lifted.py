@@ -6,9 +6,9 @@ import tarski.fstrips as fs
 from tarski import Term
 from tarski.fstrips import FunctionalEffect
 from tarski.fstrips.manipulation.simplify import simplify_existential_quantification, Simplify
-from tarski.fstrips.representation import classify_atom_occurrences_in_formula
+from tarski.fstrips.representation import classify_atom_occurrences_in_formula, substitute_expression
 from tarski.syntax import symref, CompoundFormula, QuantifiedFormula, Tautology, CompoundTerm, Atom, \
-    Contradiction, term_substitution, forall, land, implies, lor, exists, Constant, Variable, Predicate
+    Contradiction, forall, land, implies, lor, exists, Constant, Variable, Predicate
 from tarski.syntax.formulas import quantified
 from tarski.syntax.ops import flatten
 from tarski.syntax.sorts import parent, compute_signature_bindings, Interval
@@ -259,12 +259,12 @@ class FullyLiftedEncoding:
         args = vars_ + [vart]
         happens = apred(*args)
 
-        prec = term_substitution(flatten(op.precondition), substitution)
+        prec = substitute_expression(flatten(op.precondition), substitution)
         a_implies_prec = forall(*args, implies(happens, self.to_metalang(prec, vart)))
         self.theory.append(a_implies_prec)
 
         for eff in op.effects:
-            eff = term_substitution(eff, substitution)
+            eff = substitute_expression(eff, substitution)
             antec = happens
 
             # Prepend the effect condition, if necessary:
@@ -313,7 +313,7 @@ class FullyLiftedEncoding:
                 yvar = ml.variable("y", ml.get_sort(p.codomain.name))
                 at_t = self.to_metalang(atom, tvar)
                 at_t1 = self.to_metalang(atom, tvar+1)
-                gamma_replaced = term_substitution(self.gamma_fun[p.name], {symref(yvar): at_t1})
+                gamma_replaced = substitute_expression(self.gamma_fun[p.name], {symref(yvar): at_t1})
                 fun = forall(*fquant, implies(at_t != at_t1, gamma_replaced))
                 self.theory += [fun]
 
@@ -421,7 +421,7 @@ def analyze_action_effects(lang, schemas):
 
             # Let's substitute the action parameters for some standard variable names such as z1, z2, ... so that
             # later on in the compilation we can use them off the self.
-            eff = term_substitution(eff, substitution)
+            eff = substitute_expression(eff, substitution)
             atom = eff.atom if isinstance(eff, (fs.AddEffect, fs.DelEffect)) else eff.lhs
 
             if isinstance(eff, fs.AddEffect):
