@@ -2,12 +2,27 @@ from os import path
 
 from tarski.benchmarks.blocksworld import generate_fstrips_blocksworld_problem
 from tarski.benchmarks.counters import generate_fstrips_counters_problem
+from tarski.benchmarks import storytellers
 
 from fstripssmt.runner import run_on_problem
 from tests.plan.common import reader, collect_strips_benchmarks
 
 here = path.abspath(path.dirname(__file__))
 benchmarks = path.abspath(path.join(here, '..', '..', 'benchmarks'))
+
+
+def test_on_storytellers():
+    problem = storytellers.generate_problem(nstorytellers=3, naudiences=2, nstories=6, goal_type="equality")
+    plan = run_on_problem(problem, reachability="none", max_horizon=2, grounding='none',
+                          smtlib_filename="theory.smtlib", print_full_model=True, solver_name="cvc4")
+    assert plan == ['(move b1 table)']
+
+
+def test_on_storytellers_ground():
+    problem = storytellers.generate_problem(nstorytellers=3, naudiences=2, nstories=6, goal_type="equality")
+    plan = run_on_problem(problem, reachability="none", max_horizon=4, grounding='full',
+                          smtlib_filename="theory.smtlib", print_full_model=True, solver_name="cvc4")
+    assert plan == ['(move b1 table)']
 
 
 def test_on_fstrips_bw():
