@@ -366,6 +366,7 @@ class FullyLiftedEncoding:
             args = tuple(self.to_metalang(psi, subt) for psi in phi.subterms)
 
             if phi.symbol.builtin:
+                # We cannot simply use the dispatch_operator method, since we're dealing with two different languages
                 op, lhs, rhs = ml.get_operator_matching_arguments(phi.symbol.symbol, *args)
                 return op(lhs, rhs)
 

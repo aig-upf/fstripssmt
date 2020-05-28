@@ -17,7 +17,6 @@ import tarski
 from tarski.syntax.ops import free_variables
 from tarski.utils import resources
 from tarski.syntax import top
-from tarski.fstrips.walker import ProblemWalker
 from tarski.grounding.ops import approximate_symbol_fluency
 from tarski.syntax import symref, CompoundFormula, QuantifiedFormula, Tautology, CompoundTerm, Atom, \
    Contradiction, land, implies, exists, Constant, Variable, Predicate
@@ -27,7 +26,7 @@ from tarski.syntax.util import get_symbols
 import tarski.fstrips as fs
 
 
-class SemanticInterferences(ProblemWalker):
+class SemanticInterferences:
     """
     This class implements the computation of semantic interferences using
     various calls to an external SMT solver, a-la:
@@ -110,6 +109,12 @@ class SemanticInterferences(ProblemWalker):
 
         elif isinstance(phi, CompoundTerm):
             args = tuple(self.to_metalang(psi, subt) for psi in phi.subterms)
+
+            if phi.symbol.builtin:
+                # We cannot simply use the dispatch_operator method, since we're dealing with two different languages
+                op, lhs, rhs = ml.get_operator_matching_arguments(phi.symbol.symbol, *args)
+                return op(lhs, rhs)
+
             if self.symbol_is_fluent(phi.symbol):
                 args += (_get_timestep_const(ml, t),)
 
