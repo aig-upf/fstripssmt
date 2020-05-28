@@ -10,7 +10,7 @@ from tarski.syntax.ops import all_variables
 from tarski.syntax.ops import compute_sort_id_assignment
 
 from fstripssmt.solvers.common import solve
-from .solvers.pysmt import PySMTTranslator, print_as_smtlib
+from .solvers.pysmt import PySMTTranslator
 from .errors import TransformationError
 
 import tarski
@@ -264,11 +264,14 @@ class SemanticInterferences:
             anames = set(a.name for a in self.problem.actions.values())
             translator = PySMTTranslator(language, self.static_symbols, anames)
             #print(f"theory: {theory}")
-            translated = translator.translate(theory, horizon)
+            translated = translator.translate(theory)
             #print(f"translated: {translated}")
+
             # Let's simplify the sentences for further clarity
-            translated = [t.simplify() for t in translated]
-            print_as_smtlib(translated,[], sys.stdout)
+            translated = translator.simplify(translated)
+
+            translator.print_as_smtlib(translated, {}, sys.stdout)
+
             model = solve(translated, 'z3')
             return model #decode_smt_model(model, horizon, translator)
 
