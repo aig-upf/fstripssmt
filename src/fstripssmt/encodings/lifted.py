@@ -8,11 +8,12 @@ from tarski.fstrips import FunctionalEffect
 from tarski.fstrips.manipulation.simplify import simplify_existential_quantification, Simplify
 from tarski.fstrips.representation import classify_atom_occurrences_in_formula
 from tarski.syntax import symref, CompoundFormula, QuantifiedFormula, Tautology, CompoundTerm, Atom, \
-    Contradiction, term_substitution, forall, land, implies, lor, exists, Constant, Variable, Predicate
+    Contradiction, term_substitution, forall, land, implies, lor, exists, Constant, Variable, Predicate, sorts
 from tarski.syntax.formulas import quantified
 from tarski.syntax.ops import flatten
 from tarski.syntax.sorts import parent, compute_signature_bindings, Interval
 from tarski.syntax.util import get_symbols
+from tarski.theories import Theory
 
 from ..errors import TransformationError
 
@@ -29,6 +30,7 @@ class FullyLiftedEncoding:
         self.lang = problem.language
 
         self.choice_symbols = compute_choice_symbols(problem.language, problem.init)
+        self.sort_map = dict()  # A map from sorts in the original language to sorts in the metalanguage
         self.metalang = self.setup_metalang(problem)
 
         # A map from compound terms to corresponding state variables
@@ -50,15 +52,28 @@ class FullyLiftedEncoding:
     def setup_metalang(self, problem):
         """ Set up the Tarski metalanguage where we will build the SMT compilation. """
         lang = problem.language
-        ml = tarski.fstrips.language(f"{lang.name}-smt", theories=["equality", "arithmetic"])
+        theories = lang.theories | {Theory.EQUALITY, Theory.ARITHMETIC}
+        ml = tarski.fstrips.language(f"{lang.name}-smt", theories=theories)
 
         # Declare all sorts
         for s in lang.sorts:
             if not s.builtin and s.name != "object":
                 if isinstance(s, Interval):
-                    ml.interval(s.name, parent(s).name, s.lower_bound, s.upper_bound)
+                    self.sort_map[s] = ml.interval(s.name, parent(s).name, s.lower_bound, s.upper_bound)
                 else:
-                    ml.sort(s.name, parent(s).name)
+                    self.sort_map[s] = ml.sort(s.name, parent(s).name)
+
+        # Map remaining sorts
+        self.sort_map[lang.Object] = ml.Object
+
+        if Theory.ARITHMETIC in lang.theories:
+            self.sort_map[lang.Integer] = ml.Integer
+            self.sort_map[lang.Natural] = ml.Natural
+            self.sort_map[lang.Real] = ml.Real
+
+        if Theory.SETS in lang.theories:
+            self.sort_map[sorts.Set(lang, lang.Object)] = sorts.Set(ml, ml.Object)
+            self.sort_map[sorts.Set(lang, lang.Integer)] = sorts.Set(ml, ml.Integer)
 
         # Declare an extra "timestep" sort with a large range, which we'll adjust once we know the horizon
         ml.Timestep = ml.interval("timestep", ml.Natural, 0, 99999)
@@ -112,7 +127,10 @@ class FullyLiftedEncoding:
             action_happens_at_t = ml.get_predicate(act.name)(*action_binding, tvar)
             effcond = self.to_metalang(eff.condition, tvar)
             gamma_binding = self.compute_gamma_binding(ml, eff, symbol)
-            gamma_act = exists(*action_binding, land(action_happens_at_t, effcond, *gamma_binding, flat=True))
+
+            gamma_act = land(action_happens_at_t, effcond, *gamma_binding, flat=True)
+            if action_binding:  # exist-quantify the action parameters other than the timestep t
+                gamma_act = exists(*action_binding, gamma_act)
 
             # We chain a couple of simplifications of the original gamma expression
             gamma_act = Simplify().simplify_expression(simplify_existential_quantification(gamma_act))
@@ -362,22 +380,27 @@ class FullyLiftedEncoding:
 
         elif isinstance(phi, CompoundTerm):
             args = tuple(self.to_metalang(psi, subt) for psi in phi.subterms)
+            symbol = phi.symbol
 
-            if phi.symbol.builtin:
-                op, lhs, rhs = ml.get_operator_matching_arguments(phi.symbol.symbol, *args)
-                return op(lhs, rhs)
+            # if phi.symbol in get_set_symbols():
+            #     return op(lhs, rhs)
 
-            if self.symbol_is_fluent(phi.symbol):
+            if symbol.builtin:
+                # op, lhs, rhs = ml.get_operator_matching_arguments(symbol.name, *args)
+                return self.metalang.dispatch_operator(symbol.name, *args)
+
+            if self.symbol_is_fluent(symbol):
                 args += (_get_timestep_term(ml, t),)
 
-            return CompoundTerm(ml.get_function(phi.symbol.name), args)
+            return CompoundTerm(ml.get_function(symbol.name), args)
 
         elif isinstance(phi, Atom):
             args = tuple(self.to_metalang(psi, subt) for psi in phi.subterms)
             if self.symbol_is_fluent(phi.symbol):
                 args += (_get_timestep_term(ml, t),)
 
-            return Atom(ml.get_predicate(phi.symbol.name), args)
+            predicate_sort = tuple(self.sort_map[s] for s in phi.symbol.sort)
+            return Atom(ml.get_predicate(phi.symbol.name, signature=predicate_sort), args)
 
         raise TransformationError(f"Don't know how to transform element or expression '{phi}' to the SMT metalanguage")
 

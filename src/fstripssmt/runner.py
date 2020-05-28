@@ -2,7 +2,6 @@
     Helper to run the planner
 """
 import errno
-import itertools
 import logging
 import sys
 import os
@@ -16,15 +15,18 @@ from tarski.grounding.ops import approximate_symbol_fluency
 from tarski.syntax import QuantifiedFormula, Quantifier, lor, land
 from tarski.syntax.formulas import is_and
 from tarski.syntax.ops import free_variables
-from tarski.syntax.transform import compile_universal_effects_away
+from tarski.syntax.transform import compile_universal_effects_away, remove_quantifiers, QuantifierEliminationMode
 from tarski.io import FstripsReader, find_domain_filename
 from tarski.syntax.transform.substitutions import term_substitution, create_substitution
+from tarski.theories import has_theory, Theory
 from tarski.utils import resources
 
 from fstripssmt.encodings.lifted import FullyLiftedEncoding
 from fstripssmt.solvers.common import solve
 from .errors import TransformationError
-from .solvers.pysmt import PySMTTranslator, linearize_parallel_plan, print_as_smtlib, compute_signature_bindings
+from .solvers.smtlib import SMTLIBTranslator
+from .solvers.pysmt import PySMTTranslator, linearize_parallel_plan, compute_signature_bindings
+from .solvers.smtlib_solver import solve_smtlib
 
 
 def parse_arguments(args):
@@ -82,16 +84,26 @@ def enumerate_substitutions(variables, horizon):
         yield create_substitution(variables, values)
 
 
-def fully_ground(f, horizon):
-    if not isinstance(f, QuantifiedFormula):
-        return f
+def fully_ground(smtlang, f, horizon):
+    phi = remove_quantifiers(smtlang, f, QuantifierEliminationMode.All)
+    phi = Simplify().simplify_expression(phi)
+    if phi is False:
+        raise RuntimeError(f'Formula {phi} simplified to False, hence the theory is not satisfiable')
+    return phi
 
-    clauses = []
-    for subst in enumerate_substitutions(f.variables, horizon):
-        clauses.append(fully_ground(term_substitution(f.formula, subst, inplace=False), horizon))
+    # if not isinstance(f, QuantifiedFormula):
+    #     return f
+    #
+    # clauses = []
+    # for subst in enumerate_substitutions(f.variables, horizon):
+    #     clauses.append(fully_ground(term_substitution(f.formula, subst, inplace=False), horizon))
+    #
+    # connective = lor if f.quantifier == Quantifier.Exists else land
+    # return connective(*clauses, flat=True)
 
-    connective = lor if f.quantifier == Quantifier.Exists else land
-    return connective(*clauses, flat=True)
+
+def choose_translator_based_on_theory(smtlang):
+    return SMTLIBTranslator if has_theory(smtlang, "sets") else PySMTTranslator
 
 
 def run_on_problem(problem, reachability, max_horizon, grounding, smtlib_filename=None, solver_name='z3',
@@ -122,7 +134,7 @@ def run_on_problem(problem, reachability, max_horizon, grounding, smtlib_filenam
         smtlang, formulas, comments = encoding.generate_theory(horizon=horizon)
 
     if grounding == 'full':
-        comments, formulas = ground_smt_theory(comments, formulas, horizon)
+        comments, formulas = ground_smt_theory(smtlang, comments, formulas, horizon)
 
     # Some sanity check: All formulas must be sentences!
     for formula in formulas:
@@ -133,11 +145,13 @@ def run_on_problem(problem, reachability, max_horizon, grounding, smtlib_filenam
     # Once we have the theory in Tarski format, let's just translate it into PySMT format:
     with resources.timing(f"Translating theory to pysmt", newline=True):
         anames = set(a.name for a in problem.actions.values())
-        translator = PySMTTranslator(smtlang, statics, anames)
-        translated = translator.translate(formulas, horizon)
+
+        translator_class = choose_translator_based_on_theory(smtlang)
+        translator = translator_class(smtlang, statics, anames)
+        translated = translator.translate(formulas)
 
         # Let's simplify the sentences for further clarity
-        translated = [t.simplify() for t in translated]
+        translated = translator.simplify(translated)
 
     # Some optional debugging statements:
     # _ = [print(f"{i}. {s}") for i, s in enumerate(formulas)]
@@ -151,42 +165,64 @@ def run_on_problem(problem, reachability, max_horizon, grounding, smtlib_filenam
     if smtlib_filename is not None:
         with resources.timing(f"Writing theory to file \"{smtlib_filename}\"", newline=True):
             with open(smtlib_filename, "w") as f:
-                print_as_smtlib(translated, comments, f)
+                translator.print_as_smtlib(translated, comments, f)
 
     with resources.timing(f"Solving theory", newline=True):
-        model = solve(translated, solver_name)
-        return decode_smt_model(model, horizon, translator, print_full_model)
+        if Theory.SETS in smtlang.theories:
+            smtlib_solver = solve_smtlib(translated, solver_name, logic="QF_UFLIAFS")
+            plan = decode_satlib_model(smtlib_solver, horizon, translator, print_full_model)
+        else:
+            model = solve(translated, solver_name)
+            plan = decode_smt_model(model, horizon, translator, print_full_model)
+    if plan:
+        print(f"Found length-{len(plan)} plan:")
+        print('\n'.join(map(str, plan)))
+    return plan
 
 
-def ground_smt_theory(comments, formulas, horizon):
+def ground_smt_theory(smtlang, comments, formulas, horizon):
     with resources.timing(f"Grounding theory", newline=True):
-        unwrap = lambda phi: phi.subformulas if is_and(phi) else [phi]
-        formulas = [fully_ground(f, horizon) for f in formulas]
+
+        # First ground the quantifiers, and rule out results that are True
+        formulas = list(filter(lambda x: x is not True,
+                               (fully_ground(smtlang, f, horizon) for f in formulas)))
+
+        # Now reindex the comments and "unwrap" conjunctions assert A and B
+        # into two different assertions assert A; assert B
         ground = []
         reindexed_comments = dict()
+        unwrap_conjunction = lambda phi: phi.subformulas if is_and(phi) else [phi]
         for i, f in enumerate(formulas, start=0):
             if i in comments:
                 reindexed_comments[len(ground)] = comments[i]
-            ground += unwrap(f)
+            ground += unwrap_conjunction(f)
         formulas = ground
         comments = reindexed_comments
     return comments, formulas
 
 
-def decode_smt_model(model, horizon, translator, print_full_model):
+def decode_smt_model(smtlib_solver, horizon, translator, print_full_model):
+    if smtlib_solver is None:
+        print(f"Could not solve problem under given horizon {horizon}")
+        # ucore = get_unsat_core(translated)
+        # print(f"Showing unsat core of size {len(ucore)}:")
+        # for f in ucore:
+        #     print(f.serialize())
+        return None
+
+    return linearize_parallel_plan(translator.extract_parallel_plan(smtlib_solver, horizon, print_full_model))
+
+
+def decode_satlib_model(model, horizon, translator, print_full_model):
     if model is None:
         print(f"Could not solve problem under given horizon {horizon}")
         # ucore = get_unsat_core(translated)
         # print(f"Showing unsat core of size {len(ucore)}:")
         # for f in ucore:
         #     print(f.serialize())
-
         return None
 
-    plan = linearize_parallel_plan(translator.extract_parallel_plan(model, horizon, print_full_model))
-    print(f"Found length-{len(plan)} plan:")
-    print('\n'.join(map(str, plan)))
-    return plan
+    return linearize_parallel_plan(translator.extract_parallel_plan(model, horizon, print_full_model))
 
 
 def run(args):

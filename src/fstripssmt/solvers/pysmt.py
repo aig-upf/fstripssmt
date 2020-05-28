@@ -1,4 +1,6 @@
-# A mapping of Tarski-based theories into PySMT.
+"""
+    A mapping of Tarski-based theories into PySMT.
+"""
 import itertools
 from collections import defaultdict
 from datetime import datetime
@@ -8,32 +10,23 @@ import pysmt.smtlib.commands as smtcmd
 from pysmt.smtlib.script import SmtLibScript, SmtLibCommand
 
 from tarski.syntax import symref, Sort, CompoundFormula, QuantifiedFormula, Tautology, CompoundTerm, Atom, \
-    Interval, Contradiction, Function, Constant, Variable, Quantifier
+    Contradiction, Function, Constant, Variable, Quantifier
 from pysmt.shortcuts import FreshSymbol, Symbol, Int, Real, FunctionType, And, ForAll, Exists, get_env
 from pysmt.shortcuts import LT, GE, Implies, TRUE, FALSE
 from pysmt.typing import INT, BOOL, REAL
-from tarski.syntax.sorts import parent
+from tarski.syntax.sorts import parent, Set, Interval
 from tarski.syntax.util import get_symbols
-from tarski.theories import has_theory
-from tarski.syntax.ops import compute_sort_id_assignment
 
 from fstripssmt.encodings.pysmt import get_pysmt_connective, get_pysmt_predicate
 from fstripssmt.errors import TransformationError
+from fstripssmt.solvers.common import SMTTranslator
 
 
-class PySMTTranslator:
+class PySMTTranslator(SMTTranslator):
     """ """
 
     def __init__(self, smtlang, static_symbols, action_names):
-        assert has_theory(smtlang, "arithmetic")
-        self.smtlang = smtlang
-        self.static_symbols = static_symbols
-        self.action_names = action_names
-
-        # Compute a sort-contiguous object ID assignment
-        self.sort_bounds, self.object_ids = compute_sort_id_assignment(self.smtlang)
-        # print(self.sort_bounds)
-        # print(self.object_ids)
+        super().__init__(smtlang, static_symbols, action_names)
 
         self.vars = dict()
         self.theory = []
@@ -60,19 +53,15 @@ class PySMTTranslator:
         funtype = FunctionType(codomain_type, domain_types)
         return Symbol(fun.name, funtype), funtype
 
-    def translate(self, theory, horizon):
-        # TODO the `horizon` shouldn't be necessary here, but so far we cannot have a bounded *natural* interval in
-        #      Tarski, so we have this ugly workaround. Should fix this in Tarski and clean this up
+    def translate(self, theory):
         for i, phi in enumerate(theory, start=1):
-            # print(f'Translating SMT sentence #{i}')
-            if not isinstance(phi, str):
-                self.theory.append(self.rewrite(phi, {}, horizon))
+            self.theory.append(self.rewrite(phi, {}))
         return self.theory
 
-    def rewrite(self, phi, varmap, horizon):
+    def rewrite(self, phi, varmap):
 
         if isinstance(phi, QuantifiedFormula):
-            return self.rewrite_quantified_formula(phi, varmap, horizon)
+            return self.rewrite_quantified_formula(phi, varmap)
 
         elif isinstance(phi, Tautology):
             return TRUE()
@@ -82,16 +71,16 @@ class PySMTTranslator:
 
         elif isinstance(phi, CompoundFormula):
             pysmt_fun = get_pysmt_connective(phi.connective)
-            return pysmt_fun(*(self.rewrite(psi, varmap, horizon) for psi in phi.subformulas))
+            return pysmt_fun(*(self.rewrite(psi, varmap) for psi in phi.subformulas))
 
         elif isinstance(phi, (Atom, CompoundTerm)):
             if phi.symbol.builtin:
                 if len(phi.subterms) != 2:
                     raise TransformationError(f"Unsupported non-binary builtin expression {phi}")
-                lhs, rhs = (self.rewrite(psi, varmap, horizon) for psi in phi.subterms)
+                lhs, rhs = (self.rewrite(psi, varmap) for psi in phi.subterms)
                 return get_pysmt_predicate(phi.symbol.symbol)(lhs, rhs)
 
-            return self.smt_fun_application(phi, varmap, horizon)
+            return self.smt_fun_application(phi, varmap)
             # if phi.symbol in self.nested_symbols:
             #     # Even if phi is a state variable, if its head symbol appears nested elsewhere, we'll need to deal
             #     # with it as an uninterpreted function
@@ -113,28 +102,28 @@ class PySMTTranslator:
 
         raise TransformationError(f"Don't know how to translate formula '{phi}'")
 
-    def rewrite_quantified_formula(self, phi, varmap, horizon):
-        vars_, bounds = zip(*(self.create_quantified_variable(v, horizon) for v in phi.variables))
+    def rewrite_quantified_formula(self, phi, varmap):
+        vars_, bounds = zip(*(self.create_quantified_variable(v) for v in phi.variables))
         # We merge the two variable assignments:
         varmap.update((v.symbol, pysmt_var) for v, pysmt_var in zip(phi.variables, vars_))
         if phi.quantifier == Quantifier.Exists:
             creator = Exists
             # Exist x . type(x) and \phi
-            f = And(And(*bounds), self.rewrite(phi.formula, varmap, horizon))
+            f = And(And(*bounds), self.rewrite(phi.formula, varmap))
 
         else:
             # Forall x . type(x) implies \phi
             creator = ForAll
-            f = Implies(And(*bounds), self.rewrite(phi.formula, varmap, horizon))
+            f = Implies(And(*bounds), self.rewrite(phi.formula, varmap))
 
         return creator(vars_, f)
 
-    def smt_fun_application(self, phi, varmap, horizon):
+    def smt_fun_application(self, phi, varmap):
         key = symref(phi)
         try:
             return self.vars[key]
         except KeyError:
-            params = [self.rewrite(st, varmap, horizon) for st in phi.subterms]
+            params = [self.rewrite(st, varmap) for st in phi.subterms]
             fun, ftype = self.smt_functions[phi.symbol.name]
             self.vars[key] = res = pysmt.shortcuts.Function(fun, params)
         return res
@@ -168,10 +157,13 @@ class PySMTTranslator:
         if isinstance(sort, Interval):
             return self.resolve_constant(c, parent(sort))
 
+        if isinstance(sort, Set):
+            return self.resolve_constant(c, parent(sort))
+
         # Otherwise we must have an enumerated type and simply return the object ID
         return Int(self.object_ids[symref(c)])
 
-    def create_quantified_variable(self, v, horizon):
+    def create_quantified_variable(self, v):
         # First deal with the two unbound cases:
         if v.sort == self.smtlang.Integer:
             return Symbol(v.symbol, INT), TRUE()
@@ -222,6 +214,51 @@ class PySMTTranslator:
                     #     print(term)
 
         return plan
+
+    def print_as_smtlib(self, smt_formulas, comments, cout):
+        # script = smtlibscript_from_formula(And(smt_formulas), logic="QF_UFIDL")
+        # script = SmtLibScript()
+        # script.add(name=smtcmd.SET_LOGIC, args=["QF_UFIDL"])
+        print(f';; File automatically generated on {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}', file=cout)
+
+        print_script_command_line(cout, name=smtcmd.SET_LOGIC, args=["QF_UFIDL"])
+        print("", file=cout)
+
+        # The code below has largely been copied from smtlibscript_from_formula, with a few modifications
+        # to work on a list of formulas
+        # We simply create an And in order to be able to gather all types and free variables efficiently
+        formula_and = And(smt_formulas)
+        # Declare all types
+        for type_ in get_env().typeso.get_types(formula_and, custom_only=True):
+            # script.add(name=smtcmd.DECLARE_SORT, args=[type_.decl])
+            print_script_command_line(cout, name=smtcmd.DECLARE_SORT, args=[type_.decl])
+        print("", file=cout)
+
+        # Declare all variables
+        for symbol in formula_and.get_free_variables():
+            assert symbol.is_symbol()
+            # script.add(name=smtcmd.DECLARE_FUN, args=[symbol])
+            print_script_command_line(cout, name=smtcmd.DECLARE_FUN, args=[symbol])
+
+        print("", file=cout)
+
+        # Assert formulas
+        for i, formula in enumerate(smt_formulas, start=0):
+            if i in comments:
+                print(f"\n{comments[i]}", file=cout)
+            # script.add_command(SmtLibCommand(name=smtcmd.ASSERT, args=[formula]))
+            print_script_command_line(cout, name=smtcmd.ASSERT, args=[formula])
+
+        print("\n", file=cout)
+
+        # check-sat
+        # script.add_command(SmtLibCommand(name=smtcmd.CHECK_SAT, args=[]))
+        print_script_command_line(cout, name=smtcmd.CHECK_SAT, args=[])
+
+        # script.serialize(cout, daggify=False)
+
+    def simplify(self, translated):
+        return [t.simplify() for t in translated]
 
     # **************** SOME OLD CODE THAT COULD STILL BE USEFUL FOLLOWS **************** #
     # **************** SOME OLD CODE THAT COULD STILL BE USEFUL FOLLOWS **************** #
@@ -298,49 +335,6 @@ def print_script_command_line(cout, name, args):
     script = SmtLibScript()
     script.add_command(SmtLibCommand(name=name, args=args))
     script.serialize(cout, daggify=False)
-
-
-def print_as_smtlib(smt_formulas, comments, cout):
-    # script = smtlibscript_from_formula(And(smt_formulas), logic="QF_UFIDL")
-    # script = SmtLibScript()
-    # script.add(name=smtcmd.SET_LOGIC, args=["QF_UFIDL"])
-    print(f";; File automatically generated on {datetime.now().date()}", file=cout)
-
-    print_script_command_line(cout, name=smtcmd.SET_LOGIC, args=["QF_UFIDL"])
-    print("", file=cout)
-
-    # The code below has largely been copied from smtlibscript_from_formula, with a few modifications
-    # to work on a list of formulas
-    # We simply create an And in order to be able to gather all types and free variables efficiently
-    formula_and = And(smt_formulas)
-    # Declare all types
-    for type_ in get_env().typeso.get_types(formula_and, custom_only=True):
-        # script.add(name=smtcmd.DECLARE_SORT, args=[type_.decl])
-        print_script_command_line(cout, name=smtcmd.DECLARE_SORT, args=[type_.decl])
-    print("", file=cout)
-
-    # Declare all variables
-    for symbol in formula_and.get_free_variables():
-        assert symbol.is_symbol()
-        # script.add(name=smtcmd.DECLARE_FUN, args=[symbol])
-        print_script_command_line(cout, name=smtcmd.DECLARE_FUN, args=[symbol])
-
-    print("", file=cout)
-
-    # Assert formulas
-    for i, formula in enumerate(smt_formulas, start=0):
-        if i in comments:
-            print(f"\n{comments[i]}", file=cout)
-        # script.add_command(SmtLibCommand(name=smtcmd.ASSERT, args=[formula]))
-        print_script_command_line(cout, name=smtcmd.ASSERT, args=[formula])
-
-    print("\n", file=cout)
-
-    # check-sat
-    # script.add_command(SmtLibCommand(name=smtcmd.CHECK_SAT, args=[]))
-    print_script_command_line(cout, name=smtcmd.CHECK_SAT, args=[])
-
-    # script.serialize(cout, daggify=False)
 
 
 def compute_signature_bindings(lang, signature, horizon):
