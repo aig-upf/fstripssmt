@@ -11,13 +11,14 @@ from pathlib import Path
 
 from tarski import Variable
 from tarski.fstrips.manipulation.simplify import Simplify
+from tarski.fstrips.representation import compile_universal_effects_away
 from tarski.grounding.ops import approximate_symbol_fluency
 from tarski.syntax import QuantifiedFormula, Quantifier, lor, land
 from tarski.syntax.formulas import is_and
 from tarski.syntax.ops import free_variables
-from tarski.syntax.transform import compile_universal_effects_away, remove_quantifiers, QuantifierEliminationMode
+from tarski.syntax.transform import remove_quantifiers, QuantifierEliminationMode
 from tarski.io import FstripsReader, find_domain_filename
-from tarski.syntax.transform.substitutions import term_substitution, create_substitution
+from tarski.syntax.transform.substitutions import create_substitution, substitute_expression
 from tarski.theories import has_theory, Theory
 from tarski.utils import resources
 
@@ -220,6 +221,7 @@ def decode_satlib_model(model, horizon, translator, print_full_model):
         # print(f"Showing unsat core of size {len(ucore)}:")
         # for f in ucore:
         #     print(f.serialize())
+
         return None
 
     return linearize_parallel_plan(translator.extract_parallel_plan(model, horizon, print_full_model))
