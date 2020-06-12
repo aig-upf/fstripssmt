@@ -167,7 +167,7 @@ class SemanticInterferences:
         """
         ml = self.metalang
         # Do we really need this?
-        #self.metalang.Timestep.set_bounds(0, 1)
+        self.metalang.Timestep.set_bounds(0, 2)
 
         # Must check for each pair of effects in case they talk about the same predicate
         for a_eff in a.effects:
@@ -219,59 +219,50 @@ class SemanticInterferences:
                         combinations_substitutions.append(mapping)
 
                     print(f"actions {a} and {b} have {len(combinations_substitutions)} combinations to check:")
-                    print(combinations_substitutions)
+                    #print(combinations_substitutions)
 
                     # Then in the problem we should phrase the question i.e.  Eff_a \sigma_b, and Eff_b \sigma_a
                     # and do an allsolutions considering all the possible combinations of equality and inequalities
                     # between action parameters.
-                    for substitution in combinations_substitutions:
+                    for idx_combination, substitution in enumerate(combinations_substitutions):
                         # first we substitute action parameters
                         sa_eff = substitute_expression(a_eff, substitution_a)
                         sb_eff = substitute_expression(b_eff, substitution_b)
                         # and then our stuff
                         exp1 = substitute_expression(sa_eff, substitution)
                         exp2 = substitute_expression(sb_eff, substitution)
-                        print(f"Applying {substitution} to {a_eff} leads to: {exp1}")
-                        print(f"Applying {substitution} to {b_eff} leads to: {exp2}")
+                        #print(f"\nsubstitution of vars by constant values\n-----------")
+                        #print(f"Applying {substitution}\n\t to {sa_eff}\n\t leads to: {exp1}")
+                        #print(f"Applying {substitution}\n\t to {sb_eff}\n\t leads to: {exp2}")
 
                         sigma_a = self.effect_as_substitution(exp1)
                         sigma_b = self.effect_as_substitution(exp2)
 
-                        print(f"sigma_b {sigma_b} extracted from {exp1}")
-                        print(f"sigma_a {sigma_a} extracted from {exp2}")
+                        #print(f"sigma_b {sigma_b} extracted from {exp1}")
+                        #print(f"sigma_a {sigma_a} extracted from {exp2}")
                         # and make the substitutions: Eff_a \sigma_b, and Eff_b \sigma_a
-                        exp1_s2 = substitute_expression(exp1, sigma_b)
-                        exp2_s1 = substitute_expression(exp2, sigma_a)
+                        exp1_s2 = self.apply_substitution_to_effect(exp1, sigma_b)
+                        exp2_s1 = self.apply_substitution_to_effect(exp2, sigma_a)
 
                         # ------- Some debug statements -------
-                        print(f"Applying {sigma_b} to {exp1} leads to: {exp1_s2}")
-                        print(f"Applying {sigma_a} to {exp2} leads to: {exp2_s1}")
-#
-#                        # construct not (sigma_a = sigma_b)
-#                        neq_eff = neg(equiv(translated_a, translated_b))
-#
-#                        # we must force that parameters are the same to be able to say that we are talking
-#                        # about the same underlying variable (i.e. the same grounded var)
-#                        parameters_term_a = substitute_expression(modified_a, subs_a).subterms
-#                        parameters_term_b = substitute_expression(modified_b, subs_b).subterms
-#                        equalities = [a == b for a, b in zip(parameters_term_a, parameters_term_b)]
-#
+                        #print(f"\nsubstitution of sigmas onto effects\n-----------")
+                        #print(f"Applying {sigma_b}\n\t to {exp1}\n\t leads to: {exp1_s2}")
+                        #print(f"Applying {sigma_a}\n\t to {exp2}\n\t leads to: {exp2_s1}")
                         ## finally lets check if not (sigma_a = sigma_b) is T - satisfiable
                         ## construct the problem and ask the SMT solver if SAT, break, else continue searching
                         #vart = _get_timestep_var(ml)
                         #all_vars = vars_a + vars_b + [vart]
                         #final_formula = exists(*all_vars, land(*(equalities + [neq_eff])))
                         #model = self.solve_theory([final_formula], ml)
-                        # construct not (sigma_a = sigma_b)
-                        # compute the substitutions and substitute the parameters on the effects
 
                         # construct not (sigma_a = sigma_b)
+                        neq_eff = neg(equiv(self.get_translated_effect(exp1_s2), self.get_translated_effect(exp2_s1)))
                         # neq_eff = neg(equiv(translated_a,translated_b))
                         #
-                        #vart = _get_timestep_var(ml)
+                        vart = _get_timestep_var(ml)
                         #all_vars = vars_a + vars_b + [vart]
                         #final_formula = exists(*all_vars, land(*(equalities + [neq_eff])))
-                        final_formula = Tautology()
+                        final_formula = exists(vart, neq_eff)
 
                         # TODO - hash the formula and check before sending to SMT solver, as it might already
                         # TODO - have been checked, because some combination of parameters might not be
@@ -284,35 +275,30 @@ class SemanticInterferences:
                             print("UNSAT, this means that they are simply commuting")
         return True
 
-    def get_translated_effect(self, a, eff, prefix):
+    def get_translated_effect(self, eff):
         """ translate the effects to the metalang """
         ml = self.metalang
-
         vart = _get_timestep_var(ml)
-        vars_ = generate_action_arguments(ml, a, char=prefix)  # Don't use the timestep arg
-        substitution_ = {symref(param): arg for param, arg in zip(a.parameters, vars_)}
-        seff = substitute_expression(eff, substitution_)
 
         # Prepend the effect condition, if necessary, and translate:
-        if not isinstance(seff.condition, Tautology):
-            antec = self.to_metalang(seff.condition, vart)
+        if not isinstance(eff.condition, Tautology):
+            antec = self.to_metalang(eff.condition, vart)
         else:
             antec = top
 
-        if isinstance(seff, fs.AddEffect):
-            trans_eff = implies(antec, self.to_metalang(seff.atom, vart + 1, subt=vart))
+        if isinstance(eff, fs.AddEffect):
+            trans_eff = implies(antec, self.to_metalang(eff.atom, vart + 1, subt=vart))
 
-        elif isinstance(seff, fs.DelEffect):
-            trans_eff = implies(antec, self.to_metalang(~seff.atom, vart + 1, subt=vart))
+        elif isinstance(eff, fs.DelEffect):
+            trans_eff = implies(antec, self.to_metalang(~eff.atom, vart + 1, subt=vart))
 
-        elif isinstance(seff, fs.FunctionalEffect):
-            lhs = self.to_metalang(seff.lhs, vart + 1, subt=vart)
-            rhs = self.to_metalang(seff.rhs, vart, subt=vart)
+        elif isinstance(eff, fs.FunctionalEffect):
+            lhs = self.to_metalang(eff.lhs, vart + 1, subt=vart)
+            rhs = self.to_metalang(eff.rhs, vart, subt=vart)
             trans_eff = implies(antec, lhs == rhs)
         else:
             raise TransformationError(f"Can't compile effect {eff}")
-        # finally return the encoded effect
-        return vars_, substitution_, trans_eff
+        return trans_eff
 
     def check1(self, a, b):
         """
@@ -354,6 +340,7 @@ class SemanticInterferences:
             #print(f"translated: {translated}")
 
             # Let's simplify the sentences for further clarity
+            translator.print_as_smtlib(translated, {}, sys.stdout)
             translated = translator.simplify(translated)
 
             translator.print_as_smtlib(translated, {}, sys.stdout)
@@ -365,52 +352,38 @@ class SemanticInterferences:
         """
          This function will, given an action and one of its effects, return the effect as a metalang substitution
         """
-        # we translate the effect
-        #vars, subs, tranlated = self.get_translated_effect(act, eff, prefix)
-
         # a clean dict to store the effect as a substitution
         substitution = {}
-
         # An add effect means identity substitution
-        vart = _get_timestep_var(self.metalang)
         if isinstance(eff, fs.AddEffect):
             # first we translate to the metalang, then make the substitutions
-            x_t = self.to_metalang(eff.atom, vart, subt=vart)
+            x_t = eff.atom
             substitution[symref(x_t)] = x_t
         elif isinstance(eff, fs.DelEffect):
-            x_t = self.to_metalang(eff.atom, vart, subt=vart)
-            substitution[symref(x_t)] = self.to_metalang(neg(eff.atom), vart, subt=vart)
+            x_t = eff.atom
+            substitution[symref(x_t)] = neg(eff.atom)
         elif isinstance(eff, fs.FunctionalEffect):
-            x_t = self.to_metalang(eff.lhs, vart, subt=vart)
-            substitution[symref(x_t)] = self.to_metalang(eff.rhs, vart, subt=vart)
+            x_t = eff.lhs
+            substitution[symref(x_t)] = eff.rhs
         else:
             print(f"What is {eff}? Baby don't hurt me!")
-
-        #return vars, subs, tranlated, substitution
         return substitution
+
+    def apply_substitution_to_effect(self, eff, substitution):
+        if isinstance(eff, fs.AddEffect):
+            # first we translate to the metalang, then make the substitutions
+            return fs.AddEffect(substitute_expression(eff.atom, substitution))
+        elif isinstance(eff, fs.DelEffect):
+            return fs.DelEffect(substitute_expression(eff.atom, substitution))
+        elif isinstance(eff, fs.FunctionalEffect):
+            return fs.FunctionalEffect(eff.lhs,substitute_expression(eff.rhs, substitution))
+        else:
+            print(f"What is {eff}? Baby don't hurt me!")
 
     def get_expression_bounds(self, expr):
         s = expr.sort
         # Note that bounds in Tarski intervals are inclusive, while here we expect an exclusive upper bound
         return (s.lower_bound, s.upper_bound + 1) if isinstance(s, Interval) else self.sort_bounds[s]
-
-    def create_quantified_variable(self, v, lang):
-        # First deal with the two unbound cases:
-        if v.sort == lang.Integer:
-            return Symbol(v.symbol, INT), TRUE()
-
-        if v.sort == lang.Real:
-            return Symbol(v.symbol, REAL), TRUE()
-
-        # Otherwise assume we have a bounded type (including Enumerated types)
-        smtvar = Symbol(v.symbol, INT)
-
-        lb, up = self.get_expression_bounds(v)
-        if lb >= up:
-            raise TransformationError(f"SMT variable corresponding to sort '{v.sort}' has cardinality 0")
-
-        bounds = And(GE(smtvar, Int(lb)), LT(smtvar, Int(up)))
-        return smtvar, bounds
 
 # auxiliary functions stolen from the lifted encoding file
 def generate_action_arguments(lang, act, char='z'):
