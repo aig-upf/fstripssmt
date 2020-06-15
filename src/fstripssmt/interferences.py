@@ -23,11 +23,12 @@ from tarski.utils import resources
 from tarski.syntax import top
 from tarski.grounding.ops import approximate_symbol_fluency
 from tarski.syntax import symref, CompoundFormula, QuantifiedFormula, Tautology, CompoundTerm, Atom, \
-   Contradiction, land, implies, exists, Constant, Variable, Predicate, sorts
+    Contradiction, land, implies, exists, Constant, Variable, Predicate, sorts
 from tarski.syntax.formulas import quantified, neg, equiv
 from tarski.syntax.sorts import parent, Interval, Enumeration
 from tarski.syntax.util import get_symbols
 import tarski.fstrips as fs
+
 
 class SemanticInterferences:
     """
@@ -37,6 +38,7 @@ class SemanticInterferences:
       Relaxing non-interference requirements in parallel plans.
       Logic Journal of the IGPL (2019).
     """
+
     def __init__(self, problem, static_symbols):
         super().__init__()
         self.problem = problem
@@ -146,25 +148,39 @@ class SemanticInterferences:
 
     def get_interferences(self):
         """ This method is our 'main', where we implement the logic """
+        # TODO In the end what we will have are pairs of actions and a set of equalities for their parameters
+        # TODO What we can do is skip some checks if we have a "global" hash of this, so we do not need to
+        # TODO repeat those checks (as we are not interested in WHY there is interefernce, only if there is)
+        interferences = []
         actions = self.problem.actions.values()
         for idx_a, a in enumerate(actions):
             for idx_b, b in enumerate(actions):
                 # The check for simple commutativity is symmetric,
                 # and therefore we do not need to check a,b and b,a.
-                if idx_b >= idx_a:
-                    self.simply_commuting(a, b)
-        return []
+                #if idx_b >= idx_a:
+                #    simply_commuting_cases = self.simply_commuting(a, b)
+                #    interferences.append((a, b, simply_commuting_cases))
+                #    interferences.append((b, a, simply_commuting_cases))
 
+                # case 1
+                check1_cases = self.check1(a, b)
+                interferences.append((a, b, check1_cases))
+
+                # case 2
+                check2_cases = self.check2(a, b)
+                interferences.append((a, b, check2_cases))
+        return interferences
 
     def simply_commuting(self, a, b):
         """
         Given action schemas a and b:
-        Check if the action schemas are not simply commuting. i.e:
+        Check in what cases the action schemas are not simply commuting. i.e:
         if not(sigma_a = sigma_b) is T-satisfiable
 
         TODO: Take into account variables in the quantifiers
         TODO: Look more closely what happens with a hierarchy of types. For now we only support flat trees of types.
         """
+        non_commuting_cases = []
         ml = self.metalang
         # Do we really need this?
         self.metalang.Timestep.set_bounds(0, 2)
@@ -186,21 +202,21 @@ class SemanticInterferences:
                     substitution_a = {symref(param): arg for param, arg in zip(a.parameters, vars_a)}
                     substitution_b = {symref(param): arg for param, arg in zip(b.parameters, vars_b)}
 
+                    # let's group action parameters by sort:
+                    vars_by_sort = defaultdict(list)
+                    for var in vars_a + vars_b:
+                        vars_by_sort[var.sort].append(symref(var))
+
                     # According to the definition 3.5 in the paper, we are checking only assignments to the same
                     # variable here. This means in the lifted setting that all parameters of the fluent at hand
                     # must be equal. Therefore, we can capture the variables appearing in the lhs of the two
                     # effects and:
                     # - remove them from further processing business, as we're assuming they're equal.
-                    equalities = [] # fixed equalities between parameters
+                    equalities = []  # fixed equalities between parameters
                     for idx, _ in enumerate(modified_a.subterms):
                         var1 = substitution_a[symref(modified_a.subterms[idx])]
                         var2 = substitution_b[symref(modified_b.subterms[idx])]
                         equalities.append(var1 == var2)
-
-                    # let's group action parameters by sort:
-                    vars_by_sort = defaultdict(list)
-                    for var in vars_a + vars_b:
-                        vars_by_sort[var.sort].append(symref(var))
 
                     # Now we generate all possible combinations of equalities and disequalities
                     grouped_vars, all_int_assignments = all_combinations_of_equalities(vars_by_sort)
@@ -211,15 +227,15 @@ class SemanticInterferences:
                     combinations_substitutions = []
                     # here we generate the formulas and compute the substitutions
                     for element in filtered_int_assignments:
-                        mapping = generate_mapping_from_assignments(grouped_vars, element, ml)
+                        mapping = generate_mapping_from_assignments(grouped_vars, element)
                         # generate the equalities/disequalities from the int assignments
                         case = generate_equalities(grouped_vars, element)
                         # and combine them with the fixed ones
                         combinations_formulas.append(land(*(case), flat=True))
                         combinations_substitutions.append(mapping)
 
-                    print(f"actions {a} and {b} have {len(combinations_substitutions)} combinations to check:")
-                    #print(combinations_substitutions)
+                    print(f"[SC] actions {a} and {b} have {len(combinations_substitutions)} combinations to check:")
+                    # print(combinations_substitutions)
 
                     # Then in the problem we should phrase the question i.e.  Eff_a \sigma_b, and Eff_b \sigma_a
                     # and do an allsolutions considering all the possible combinations of equality and inequalities
@@ -231,49 +247,226 @@ class SemanticInterferences:
                         # and then our stuff
                         exp1 = substitute_expression(sa_eff, substitution)
                         exp2 = substitute_expression(sb_eff, substitution)
-                        #print(f"\nsubstitution of vars by constant values\n-----------")
-                        #print(f"Applying {substitution}\n\t to {sa_eff}\n\t leads to: {exp1}")
-                        #print(f"Applying {substitution}\n\t to {sb_eff}\n\t leads to: {exp2}")
+                        # print(f"\nsubstitution of vars by constant values\n-----------")
+                        # print(f"Applying {substitution}\n\t to {sa_eff}\n\t leads to: {exp1}")
+                        # print(f"Applying {substitution}\n\t to {sb_eff}\n\t leads to: {exp2}")
 
                         sigma_a = self.effect_as_substitution(exp1)
                         sigma_b = self.effect_as_substitution(exp2)
 
-                        #print(f"sigma_b {sigma_b} extracted from {exp1}")
-                        #print(f"sigma_a {sigma_a} extracted from {exp2}")
+                        # print(f"sigma_b {sigma_b} extracted from {exp1}")
+                        # print(f"sigma_a {sigma_a} extracted from {exp2}")
                         # and make the substitutions: Eff_a \sigma_b, and Eff_b \sigma_a
                         exp1_s2 = self.apply_substitution_to_effect(exp1, sigma_b)
                         exp2_s1 = self.apply_substitution_to_effect(exp2, sigma_a)
 
                         # ------- Some debug statements -------
-                        #print(f"\nsubstitution of sigmas onto effects\n-----------")
-                        #print(f"Applying {sigma_b}\n\t to {exp1}\n\t leads to: {exp1_s2}")
-                        #print(f"Applying {sigma_a}\n\t to {exp2}\n\t leads to: {exp2_s1}")
-                        ## finally lets check if not (sigma_a = sigma_b) is T - satisfiable
-                        ## construct the problem and ask the SMT solver if SAT, break, else continue searching
-                        #vart = _get_timestep_var(ml)
-                        #all_vars = vars_a + vars_b + [vart]
-                        #final_formula = exists(*all_vars, land(*(equalities + [neq_eff])))
-                        #model = self.solve_theory([final_formula], ml)
+                        # print(f"\nsubstitution of sigmas onto effects\n-----------")
+                        # print(f"Applying {sigma_b}\n\t to {exp1}\n\t leads to: {exp1_s2}")
+                        # print(f"Applying {sigma_a}\n\t to {exp2}\n\t leads to: {exp2_s1}")
+                        # # finally lets check if not (sigma_a = sigma_b) is T - satisfiable
+                        # # construct the problem and ask the SMT solver if SAT, break, else continue searching
+                        # vart = _get_timestep_var(ml)
+                        # all_vars = vars_a + vars_b + [vart]
+                        # final_formula = exists(*all_vars, land(*(equalities + [neq_eff])))
+                        # model = self.solve_theory([final_formula], ml)
 
                         # construct not (sigma_a = sigma_b)
                         neq_eff = neg(equiv(self.get_translated_effect(exp1_s2), self.get_translated_effect(exp2_s1)))
                         # neq_eff = neg(equiv(translated_a,translated_b))
                         #
                         vart = _get_timestep_var(ml)
-                        #all_vars = vars_a + vars_b + [vart]
-                        #final_formula = exists(*all_vars, land(*(equalities + [neq_eff])))
+                        # all_vars = vars_a + vars_b + [vart]
+                        # final_formula = exists(*all_vars, land(*(equalities + [neq_eff])))
                         final_formula = exists(vart, neq_eff)
 
                         # TODO - hash the formula and check before sending to SMT solver, as it might already
                         # TODO - have been checked, because some combination of parameters might not be
                         # TODO - relevant for  this check
-                        model = self.solve_theory([ final_formula ], ml)
+                        model = self.solve_theory([final_formula], ml)
                         if model:
-                            print("SAT, this means that they are NOT simply commuting")
-                            return False
+                            print(f"[SC] SAT: they are NOT simply commuting when: {combinations_formulas[idx_combination]}")
+                            non_commuting_cases.append(combinations_formulas[idx_combination])
                         else:
-                            print("UNSAT, this means that they are simply commuting")
-        return True
+                            print(
+                                f"[SC] UNSAT, this means that they are simply commuting when {combinations_formulas[idx_combination]}")
+        return non_commuting_cases
+
+
+    def check1(self, a, b):
+        """
+        Given action schemas a and b:
+        Checks if a can restrict b's execution. i.e.:
+        Pre_a /\ Pre_b /\ not(Pre_b sigma_a) is T-satisfiable
+        """
+        interference_cases = []
+        ml = self.metalang
+
+        # We need to rewrite all parameters to give exclusive different names.
+        vars_a = generate_action_arguments(ml, a, char='a_')
+        vars_b = generate_action_arguments(ml, b, char='b_')
+        substitution_a = {symref(param): arg for param, arg in zip(a.parameters, vars_a)}
+        substitution_b = {symref(param): arg for param, arg in zip(b.parameters, vars_b)}
+
+        # let's group action parameters by sort:
+        vars_by_sort = defaultdict(list)
+        for var in vars_a + vars_b:
+            vars_by_sort[var.sort].append(symref(var))
+
+        # Now we generate all possible combinations of equalities and disequalities
+        grouped_vars, all_int_assignments = all_combinations_of_equalities(vars_by_sort)
+
+        combinations_formulas = []
+        combinations_substitutions = []
+        # here we generate the formulas and compute the substitutions
+        for element in all_int_assignments:
+            mapping = generate_mapping_from_assignments(grouped_vars, element)
+            # generate the equalities/disequalities from the int assignments
+            case = generate_equalities(grouped_vars, element)
+            # and combine them with the fixed ones
+            combinations_formulas.append(land(*(case), flat=True))
+            combinations_substitutions.append(mapping)
+
+        print(f"[1] actions {a} and {b} have {len(combinations_substitutions)} combinations to check:")
+
+        # Now we will check if Pre_a /\ Pre_b /\ not(Pre_b sigma_a) is T-satisfiable
+        for idx_combination, substitution in enumerate(combinations_substitutions):
+            # first we substitute action parameters
+            pre_a = substitute_expression(a.precondition, substitution_a)
+            pre_b = substitute_expression(b.precondition, substitution_b)
+
+            # and then our stuff
+            spre_a = substitute_expression(pre_a, substitution)
+            spre_b = substitute_expression(pre_b, substitution)
+
+            # print(f"pre_a {pre_a}\n spre_a: {spre_a}")
+            # print(f"pre_b {pre_b}\n spre_b: {spre_b}")
+            # print(f"substitution {substitution}")
+            # sigma_a will be the whole effect of substitutions. Here we operate on the premise
+            # than an action CANNOT modify the same thing twice.
+            sigma_a = {}
+            for eff in a.effects:
+                sub = self.effect_as_substitution(eff)
+                key = list(sub.keys())[0] # we only have one pair of key-value
+                val = list(sub.values())[0]
+                key = substitute_expression(substitute_expression(key.expr, substitution_a), substitution)
+                val = substitute_expression(substitute_expression(val, substitution_a), substitution)
+                sigma_a[symref(key)] = val
+            # print(f"sigma_a: {sigma_a}")
+
+            # TODO calculate substitution after our translations
+            pre_b_sigma_a = substitute_expression(spre_b, sigma_a)
+            # print(f"substituted pre_b_sigma_a {pre_b_sigma_a}")
+
+            # construct the formula
+            vart = _get_timestep_var(ml)
+            final_formula = exists(vart, land(spre_b, spre_a, neg(pre_b_sigma_a),flat=True))
+            final_formula = self.to_metalang(final_formula, vart, subt=vart)
+            # print(f"final check {final_formula}")
+
+            # TODO - hash the formula and check before sending to SMT solver, as it might already
+            # TODO - have been checked, because some combination of parameters might not be
+            # TODO - relevant for  this check
+            model = self.solve_theory([final_formula], ml)
+            if model:
+                print(f"[1] SAT: {a} interferes with {b}: {combinations_formulas[idx_combination]}")
+                interference_cases.append(combinations_formulas[idx_combination])
+            else:
+                print(
+                    f"[1] UNSAT, this means that {a} does not interfere with {b} when {combinations_formulas[idx_combination]}")
+        return interference_cases
+
+    def check2(self, a, b):
+        """
+        Given action schemas a and b:
+        Checks if the combination of effects is invalid. i.e.:
+        either:
+            - a and b are not simply commuting, or
+            - Pre_a /\ Pre_b /\ not ( x sigma_h({a,b}) = x sigma_b sigma_a) is T-satisfiable
+        """
+        interference_cases = []
+        ml = self.metalang
+
+        # We need to rewrite all parameters to give exclusive different names.
+        vars_a = generate_action_arguments(ml, a, char='a_')
+        vars_b = generate_action_arguments(ml, b, char='b_')
+        substitution_a = {symref(param): arg for param, arg in zip(a.parameters, vars_a)}
+        substitution_b = {symref(param): arg for param, arg in zip(b.parameters, vars_b)}
+
+        # let's group action parameters by sort:
+        vars_by_sort = defaultdict(list)
+        for var in vars_a + vars_b:
+            vars_by_sort[var.sort].append(symref(var))
+
+        # Now we generate all possible combinations of equalities and disequalities
+        grouped_vars, all_int_assignments = all_combinations_of_equalities(vars_by_sort)
+
+        combinations_formulas = []
+        combinations_substitutions = []
+        # here we generate the formulas and compute the substitutions
+        for element in all_int_assignments:
+            mapping = generate_mapping_from_assignments(grouped_vars, element)
+            # generate the equalities/disequalities from the int assignments
+            case = generate_equalities(grouped_vars, element)
+            # and combine them with the fixed ones
+            combinations_formulas.append(land(*(case), flat=True))
+            combinations_substitutions.append(mapping)
+
+        print(f"[2] actions {a} and {b} have {len(combinations_substitutions)} combinations to check:")
+
+        # Now we will check if Pre_a /\ Pre_b /\ not (x sigma_h({a, b}) = x sigma_b sigma_a) is T - satisfiable
+        for idx_combination, substitution in enumerate(combinations_substitutions):
+            # first we substitute action parameters
+            pre_a = substitute_expression(a.precondition, substitution_a)
+            pre_b = substitute_expression(b.precondition, substitution_b)
+
+            # and then our stuff
+            spre_a = substitute_expression(pre_a, substitution)
+            spre_b = substitute_expression(pre_b, substitution)
+
+            # print(f"pre_a {pre_a}\n spre_a: {spre_a}")
+            # print(f"pre_b {pre_b}\n spre_b: {spre_b}")
+            # print(f"substitution {substitution}")
+            # sigma_a will be the whole effect of substitutions. Here we operate on the premise
+            # than an action CANNOT modify the same thing twice.
+            sigma_a = {}
+            for eff in a.effects:
+                sub = self.effect_as_substitution(eff)
+                key = list(sub.keys())[0] # we only have one pair of key-value
+                val = list(sub.values())[0]
+                key = substitute_expression(substitute_expression(key.expr, substitution_a), substitution)
+                val = substitute_expression(substitute_expression(val, substitution_a), substitution)
+                sigma_a[symref(key)] = val
+            print(f"sigma_a: {sigma_a}")
+
+            sigma_b = {}
+            for eff in b.effects:
+                sub = self.effect_as_substitution(eff)
+                key = list(sub.keys())[0] # we only have one pair of key-value
+                val = list(sub.values())[0]
+                key = substitute_expression(substitute_expression(key.expr, substitution_a), substitution)
+                val = substitute_expression(substitute_expression(val, substitution_a), substitution)
+                sigma_b[symref(key)] = val
+            print(f"sigma_b: {sigma_b}")
+
+            # construct the formula
+            # vart = _get_timestep_var(ml)
+            # final_formula = exists(vart, land(spre_b, spre_a, neg(pre_b_sigma_a),flat=True))
+            # final_formula = self.to_metalang(final_formula, vart, subt=vart)
+            # print(f"final check {final_formula}")
+            final_formula = Tautology()
+
+            # TODO - hash the formula and check before sending to SMT solver, as it might already
+            # TODO - have been checked, because some combination of parameters might not be
+            # TODO - relevant for  this check
+            model = self.solve_theory([final_formula], ml)
+            if model:
+                print(f"[1] SAT: {a} interferes with {b}: {combinations_formulas[idx_combination]}")
+                interference_cases.append(combinations_formulas[idx_combination])
+            else:
+                print(
+                    f"[1] UNSAT, this means that {a} does not interfere with {b} when {combinations_formulas[idx_combination]}")
+        return interference_cases
 
     def get_translated_effect(self, eff):
         """ translate the effects to the metalang """
@@ -300,24 +493,6 @@ class SemanticInterferences:
             raise TransformationError(f"Can't compile effect {eff}")
         return trans_eff
 
-    def check1(self, a, b):
-        """
-        Given action schemas a and b:
-        Checks if a can restrict b's execution. i.e.:
-        Pre_a /\ Pre_b /\ not(Pre_b sigma_a) is T-satisfiable
-        """
-        pass
-
-    def check2(self, a, b):
-        """
-        Given action schemas a and b:
-        Checks if the combination of effects is invalid. i.e.:
-        either:
-            - a and b are not simply commuting, or
-            - Pre_a /\ Pre_b /\ not ( x sigma_h({a,b}) = x sigma_b sigma_a) is T-satisfiable
-        """
-        pass
-
     def symbol_is_fluent(self, symbol):
         """ returns True if a given symbol is a fluent, i.e. it can change over time steps """
         return not symbol.builtin and symbol not in self.static_symbols
@@ -331,22 +506,21 @@ class SemanticInterferences:
                 raise TransformationError(f'Formula {formula} has unexpected free variables: {freevars}')
 
         # Once we have the theory in Tarski format, let's just translate it into PySMT format:
-        horizon = 2 # we only check t and t+1, i.e. one transition
+        horizon = 2  # we only check t and t+1, i.e. one transition
         with resources.timing(f"Translating and solving", newline=True):
             anames = set(a.name for a in self.problem.actions.values())
             translator = PySMTTranslator(language, self.static_symbols, anames)
-            #print(f"theory: {theory}")
+            # print(f"theory: {theory}")
             translated = translator.translate(theory)
-            #print(f"translated: {translated}")
+            # print(f"translated: {translated}")
 
             # Let's simplify the sentences for further clarity
             translator.print_as_smtlib(translated, {}, sys.stdout)
             translated = translator.simplify(translated)
-
-            translator.print_as_smtlib(translated, {}, sys.stdout)
+            # translator.print_as_smtlib(translated, {}, sys.stdout)
 
             model = solve(translated, 'z3')
-            return model #decode_smt_model(model, horizon, translator)
+            return model  # decode_smt_model(model, horizon, translator)
 
     def effect_as_substitution(self, eff):
         """
@@ -376,7 +550,7 @@ class SemanticInterferences:
         elif isinstance(eff, fs.DelEffect):
             return fs.DelEffect(substitute_expression(eff.atom, substitution))
         elif isinstance(eff, fs.FunctionalEffect):
-            return fs.FunctionalEffect(eff.lhs,substitute_expression(eff.rhs, substitution))
+            return fs.FunctionalEffect(eff.lhs, substitute_expression(eff.rhs, substitution))
         else:
             print(f"What is {eff}? Baby don't hurt me!")
 
@@ -385,13 +559,16 @@ class SemanticInterferences:
         # Note that bounds in Tarski intervals are inclusive, while here we expect an exclusive upper bound
         return (s.lower_bound, s.upper_bound + 1) if isinstance(s, Interval) else self.sort_bounds[s]
 
+
 # auxiliary functions stolen from the lifted encoding file
 def generate_action_arguments(lang, act, char='z'):
     binding = [lang.variable(f"{char}{i}", lang.get_sort(v.sort.name)) for i, v in enumerate(act.parameters, start=1)]
     return binding
 
+
 def _get_timestep_sort(lang):
     return lang.Timestep
+
 
 def _get_timestep_var(lang, name="t"):
     return lang.variable(name, _get_timestep_sort(lang))
@@ -402,9 +579,11 @@ def _get_timestep_term(lang, value):
         return value
     return _get_timestep_sort(lang).cast(value)
 
+
 def _get_affected_atom(eff):
     """ Given an effect, it returns the predicate that is changed """
     return eff.atom if isinstance(eff, (fs.AddEffect, fs.DelEffect)) else eff.lhs
+
 
 def generate_set_partitions(n, shift=0):
     """
@@ -413,17 +592,17 @@ def generate_set_partitions(n, shift=0):
     n: size
     shift: how many naturals the generation must be shifted
     """
-    assert(n > 0)
+    assert (n > 0)
     kappa = [0] * n
     M = [0] * n
 
     def generator():
-        for i in range(n-1, 0, -1):
-            if (kappa[i] <= M[i - 1]):
+        for i in range(n - 1, 0, -1):
+            if kappa[i] <= M[i - 1]:
                 kappa[i] += 1
                 new_max = max(M[i], kappa[i])
                 M[i] = new_max
-                for j in range(i+1, n):
+                for j in range(i + 1, n):
                     kappa[j] = 0
                     M[j] = new_max
                 return True
@@ -445,6 +624,7 @@ def generate_set_partitions(n, shift=0):
 
     return total
 
+
 def all_combinations_of_equalities(vars_by_sort):
     """
         Given a dict of sorts to variables, generate all possible
@@ -457,7 +637,7 @@ def all_combinations_of_equalities(vars_by_sort):
     # a list of lists of variables, grouped by sort
     grouped_list_sorts = list(vars_by_sort.keys())
     elements_by_sort = [list(i.domain()) for i in grouped_list_sorts]
-    #print(type(list(grouped_list_sorts[0].domain())[0]))
+    # print(type(list(grouped_list_sorts[0].domain())[0]))
     grouped_list_vars = list(vars_by_sort.values())
 
     set_partitions = []
@@ -469,8 +649,8 @@ def all_combinations_of_equalities(vars_by_sort):
         # than objects in that sort. i.e., a sort "aircraft" with only one object and two variables
         # will generate [0,0],[0,1]. We will filter the [0,1] (as it cannot be different from itself)
         len_group = len(elements_by_sort[idx_list])
-        combinations = [ x for x in combinations if len(set(x)) <= len_group]
-        #print(f"len_group: {len_group} {combinations}")
+        combinations = [x for x in combinations if len(set(x)) <= len_group]
+        # print(f"len_group: {len_group} {combinations}")
         set_partitions.append(combinations)
 
     # OK now we substitute by elements of the current domain ....
@@ -482,30 +662,32 @@ def all_combinations_of_equalities(vars_by_sort):
     all_int_assignments = list(itertools.product(*set_partitions))
     return grouped_list_vars, all_int_assignments
 
+
 def generate_equalities(list_vars, list_numbers):
     equalities = []
     for idx_type, group in enumerate(list_numbers):
-       # Here we are going an extra mile to avoid adding some extra constraints that are obvious
-       # per the equality transitivity closure, using the `equality_done` variable.
-       #
-       # For example, for variables [a,b,c] and a group [0,0,0], we only need two
-       # equalities a = b and b = c, as per transitivity the solver will deduce that a = c.
-       for idx_var1, var1 in enumerate(list_vars[idx_type]):
-           equality_done = False
-           idx_var2 = idx_var1 + 1 # we dont want to compare a var with itself
-           while idx_var2 < len(list_vars[idx_type]):
-               var2 = list_vars[idx_type][idx_var2]
-               # Note that equality is transitive, while disequality isn't, so we need all pairs
-               if group[idx_var1] != group[idx_var2]:
-                   equalities.append(var1.expr != var2.expr)
-               # if we find another further in the list that has same value and still not added equality, do it
-               elif not equality_done:
-                   equalities.append(var1.expr == var2.expr)
-                   equality_done = True
-               idx_var2 += 1
+        # Here we are going an extra mile to avoid adding some extra constraints that are obvious
+        # per the equality transitivity closure, using the `equality_done` variable.
+        #
+        # For example, for variables [a,b,c] and a group [0,0,0], we only need two
+        # equalities a = b and b = c, as per transitivity the solver will deduce that a = c.
+        for idx_var1, var1 in enumerate(list_vars[idx_type]):
+            equality_done = False
+            idx_var2 = idx_var1 + 1  # we dont want to compare a var with itself
+            while idx_var2 < len(list_vars[idx_type]):
+                var2 = list_vars[idx_type][idx_var2]
+                # Note that equality is transitive, while disequality isn't, so we need all pairs
+                if group[idx_var1].symbol != group[idx_var2].symbol:
+                        equalities.append(var1.expr != var2.expr)
+                # if we find another further in the list that has same value and still not added equality, do it
+                elif not equality_done:
+                    equalities.append(var1.expr == var2.expr)
+                    equality_done = True
+                idx_var2 += 1
     return equalities
 
-def generate_mapping_from_assignments(grouped_vars, assignments, language):
+
+def generate_mapping_from_assignments(grouped_vars, assignments):
     """
     Given a list of lists variables and a list of lists integers,
     such as [ [ var_a, var_b ] , [ var_c ], .... and [ [ 1, 2] , [ 3 ....
@@ -514,6 +696,7 @@ def generate_mapping_from_assignments(grouped_vars, assignments, language):
     flat_vars = list(itertools.chain(*grouped_vars))  # we flatten the list of lists
     flat_ints = list(itertools.chain(*assignments))
     return {var: val for var, val in zip(flat_vars, flat_ints)}
+
 
 def filter_assignments(grouped_vars, all_int_assignments, equalities):
     """
@@ -528,9 +711,9 @@ def filter_assignments(grouped_vars, all_int_assignments, equalities):
     flattened_vars = list(itertools.chain(*grouped_vars))
     for mapping in all_int_assignments:
         adhere_to_equalities = False
-        flattened_mapping = list(itertools.chain(*mapping)) # flat the integer list
+        flattened_mapping = list(itertools.chain(*mapping))  # flat the integer list
 
-        value_map = {} # we index the  values
+        value_map = {}  # we index the  values
         for idx, _ in enumerate(flattened_vars):
             value_map[flattened_vars[idx]] = symref(flattened_mapping[idx])
 
@@ -539,7 +722,7 @@ def filter_assignments(grouped_vars, all_int_assignments, equalities):
             var1 = symref(established_eq.subterms[0])
             var2 = symref(established_eq.subterms[1])
             if value_map[var1] != value_map[var2]:
-                #print(f"mapping {mapping} do not adhere to established equality {established_eq}")
+                # print(f"mapping {mapping} do not adhere to established equality {established_eq}")
                 adhere_to_equalities = True
                 break
 
