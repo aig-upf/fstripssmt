@@ -16,7 +16,7 @@ class SMTTranslator:
         self.sort_bounds, self.object_ids = compute_sort_id_assignment(self.smtlang)
 
 
-def solve(theory, solver_name):
+def solve(theory, solver_name, silent=False):
     """ """
     # with tempfile.NamedTemporaryFile(mode='w+t', delete=False) as f:
     #     for t in theory:
@@ -27,7 +27,8 @@ def solve(theory, solver_name):
     with Solver(name=solver_name) as solver:
         # is_sat = solver.is_sat(And(theory))  # Alternatively
 
-        print(f'Using solver "{solver_name}" configured with logic {solver.logic}')
+        if not silent:
+            print(f'Using solver "{solver_name}" configured with logic {solver.logic}')
 
         for sentence in theory:
             solver.add_assertion(sentence)
